@@ -1,0 +1,79 @@
+---
+title: "Data Pre-processing and Demographics"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+ knitr::opts_chunk$set( echo = FALSE, # hide code by default 
+                        message = FALSE, # hide messages 
+                        warning = FALSE, # hide warnings 
+                        results = "hide" # hide printed output from code 
+                        )
+
+```
+
+# Data pre-processing and demographics
+
+Prep work space and load packages
+
+```{r}
+rm(list=ls())
+library(childesr)
+library(dplyr)
+
+```
+
+Load CHILDES transcripts in English-North America
+
+```{r}
+d_eng_na <- get_transcripts(collection = "Eng-NA")
+head(d_eng_na)
+count_transcripts <- nrow(d_eng_na)
+count_transcripts
+```
+
+Load participant information: Number of participants by roles
+
+```{r}
+d_participants <- get_participants(collection = "Eng-NA")
+head(d_participants)
+
+counts_by_role <- d_participants %>%
+  count(role, name = "n_participants")
+counts_by_role
+```
+
+Load information on the target child: number of target child, sex, age
+
+```{r}
+d_target_child <- get_participants(role = "target_child", collection = "Eng-NA")
+head(d_target_child)
+
+count_targetchild <- nrow(d_target_child)
+count_targetchild
+
+count_sex <- d_target_child %>%
+  count(sex)
+count_sex
+
+sum_age <-d_target_child %>%
+  summarise(
+    mean_age = mean(min_age, na.rm = TRUE),
+    sd_age = sd(min_age, na.rm = TRUE),
+    min_age = min(min_age, na.rm = TRUE),
+    max_age = max(max_age, na.rm = TRUE)
+  )
+sum_age
+```
+
+Load information about the SES and education
+
+```{r}
+count_ses <- d_participants %>%
+  count(ses)
+count_ses
+
+count_education <-d_participants %>%
+  count(education)
+count_education
+```
