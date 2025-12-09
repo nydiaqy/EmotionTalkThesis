@@ -20,6 +20,9 @@ Prep work space and load packages
 rm(list=ls())
 library(childesr)
 library(dplyr)
+library(wordcloud)
+library(ggplot2)
+library(tidyr)
 
 ```
 
@@ -76,4 +79,178 @@ count_ses
 count_education <-d_participants %>%
   count(education)
 count_education
+```
+
+# RQ1
+
+Identify if any transcripts, only the target child is speaking (no conversational partner speech)
+
+```{r}
+ut_eng_na <- get_utterances(collection = "Eng-NA")
+# Identify only-child transcripts
+onlychild_ids <- ut_eng_na %>%
+  group_by(transcript_id) %>%
+  summarise(only_child = all(speaker_code == "CHI")) %>%
+  filter(only_child == TRUE) %>%
+  pull(transcript_id)
+
+eng_na_rq1 <- d_eng_na %>%
+  filter(!transcript_id %in% onlychild_ids)
+head(eng_na_rq1)
+
+count_transcripts_rq1 <- nrow(eng_na_rq1)
+count_transcripts_rq1
+#number of transcripts where there is a conversational partner
+
+
+```
+
+Pull out all conversational patner's turns
+
+```{r}
+ut_eng_na_rq1 <- ut_eng_na %>%
+  filter(!transcript_id %in% onlychild_ids) %>%   
+  filter(speaker_code != "CHI")      
+```
+
+Create target word list
+
+```{r}
+file_lex <- read.csv("~/Desktop/R_WD/ThesisDataAnalysis/1987-Affectivelexicon-foundations_words.csv",
+                stringsAsFactors = FALSE)
+emotion_words <-file_lex$Word
+emotion_words <- unique(na.omit(emotion_words))
+head(emotion_words)
+```
+
+identify how many emotion words each utterance used
+
+```{r}
+utt_partners_emotions <- ut_eng_na_rq1 %>%
+  mutate(
+    gloss_lower = tolower(gloss),
+    emotion_count = stringr::str_count(
+      gloss_lower, 
+      paste0("\\b(", paste(emotion_words, collapse = "|"), ")\\b")
+    )
+  )
+
+gloss_vec <- utt_partners_emotions$gloss_lower
+emotion_cols <- map_dfc(emotion_words, ~ {
+  str_count(gloss_vec, paste0("\\b", .x, "\\b"))
+}) %>%
+  setNames(emotion_words)   # name columns with the words
+
+# Bind those new columns back onto your utterance-level data
+utt_partners_emotions <- bind_cols(utt_partners_emotions, emotion_cols)
+head(utt_partners_emotions)
+
+
+```
+
+Across all transcripts, how many times each words are used
+
+```{r}
+total_emotion_words <- utt_partners_emotions %>%
+  summarise(across(all_of(emotion_words), sum, na.rm = TRUE))
+
+```
+
+#### Problem 1. some of the words are not used as emotion words. e.g. like, well, kind.
+
+Step 1: get a list of the 50 most used emotion words
+
+```{r}
+long_total_emotion_words <- total_emotion_words %>%
+ pivot_longer(
+    cols = everything(),
+    names_to = "word",
+    values_to = "total_count"
+  )
+top50_words <- long_total_emotion_words %>%
+  arrange(desc(total_count)) %>%
+  slice(1:50)
+
+ggplot(top50_words, aes(x = reorder(word, total_count), 
+                        y = total_count)) +
+  geom_col(fill = "steelblue") +
+  geom_text(aes(label = total_count),
+            hjust = -0.1, size = 3) +     # <- adds labels
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    x = "Emotion Word",
+    y = "Total Count",
+    title = "Top 50 Most Frequent Emotion Words"
+  ) +
+  ylim(0, max(top50_words$total_count) * 1.1)  # extra space for labels
+```
+
+I need to tackle the ambiguous words by following steps
+
+1.  manually check what are the utterances looks like and what are the words that might not be emotion words in that context. Sample up to 20 example utterance each word
+
+```{r}
+target_50words <- tolower(top50_words$word)
+
+
+examples_50word <- map_dfr(target_50words, function(w) {
+  
+  # all utterances where this word appears at least once
+  df_w <- utt_partners_emotions %>%
+    filter(.data[[w]] > 0)   # use the column named w
+  
+  # if no utterances contain this word, skip it
+  if (nrow(df_w) == 0) return(NULL)
+  
+  # how many to sample (max 20, but not more than we have)
+  n_samp <- min(20L, nrow(df_w))
+  
+  df_w %>%
+    slice_sample(n = n_samp) %>%
+    mutate(target_word = w)
+}) 
+
+write.csv(
+  examples_50word,
+  "top50_words_20examples.csv",
+  row.names = FALSE
+)
+```
+
+-\> each word might need different method.
+
+e.g. Part of Speech tagging (well, like) , rule based exclusion (kind of), machine learning (?)
+
+emotion_counts \<- utt_partners_emotions %\>% group_by(transcript_id) %\>% summarise( total_emotion_words = sum(emotion_count, na.rm = TRUE), total_emotion_utterances = sum(emotion_count \> 0) )
+
+Sanity check:
+
+```{r}
+id_to_check <- "3893"   # replace with a transcript id
+
+transcript_check <- utt_partners_emotions %>%
+  filter(transcript_id == id_to_check) %>%
+  select(transcript_id, speaker_code, gloss, emotion_count)
+
+transcript_check <- transcript_check %>%
+  filter(emotion_count > 0)
+
+transcript_check
+```
+
+Word counts: all partner
+
+```{r}
+ut_eng_na_rq1 <- ut_eng_na_rq1 %>%
+  mutate(
+    word_count = stringr::str_count(gloss, "\\S+")  # counts non-space sequences = words
+  )
+
+partner_word_counts <- ut_eng_na_rq1 %>%
+  group_by(transcript_id) %>%
+  summarise(
+    total_partner_words = sum(word_count, na.rm = TRUE),
+    total_partner_utterances = n()
+  )
 ```
