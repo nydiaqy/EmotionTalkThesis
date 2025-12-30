@@ -23,41 +23,163 @@ library(dplyr)
 library(wordcloud)
 library(ggplot2)
 library(tidyr)
+library(purrr)
+library(stringr)
+
+
 
 ```
 
-Load CHILDES transcripts in English-North America
+Load CHILDES transcripts/ utterance dataframe in English-North America
 
 ```{r,echo=TRUE, results="show"}
 d_eng_na <- get_transcripts(collection = "Eng-NA")
 head(d_eng_na)
 count_transcripts <- nrow(d_eng_na)
 count_transcripts
+
+ut_eng_na <- get_utterances(collection = "Eng-NA")
+head(ut_eng_na)
 ```
 
-Load participant information: Number of participants by roles
+Load participant information: Number of participants, transcripts, utterances by roles
 
 ```{r,echo=TRUE, results="show"}
-d_participants <- get_participants(collection = "Eng-NA")
-head(d_participants)
 
-counts_by_role <- d_participants %>%
-  count(role, name = "n_participants")
-counts_by_role
+count_by_role_check <- ut_eng_na %>% 
+  count(speaker_code, sort = TRUE) %>%
+  print(n = 30)
+
+count_by_role_check
+count_by_role
+
+count_by_role <- ut_eng_na %>%
+  group_by(speaker_role) %>%
+  summarise(
+  n_speakers   = n_distinct(speaker_id),
+  n_transcripts = n_distinct(transcript_id),
+  n_utterances = n(),
+    .groups = "drop"
+  ) 
+#Order by number of transcripts
+count_by_role <- count_by_role %>%
+  arrange(desc(n_transcripts)) %>%
+  mutate(
+    speaker_role = factor(speaker_role,
+                          levels = speaker_role)
+  )
+
+count_by_role
+
+count_by_role_exc_child <- count_by_role %>% 
+  filter(speaker_role != "Target_Child")
+
+count_by_role_exc_child
+```
+
+Pie Chart showing number of transcripts by role excluding target child
+
+```{r}
+ggplot(count_by_role_exc_child,
+       aes(x = "", y = n_transcripts, fill = speaker_role)) +
+  geom_col(width = 1) +
+  coord_polar(theta = "y") +
+  theme_void() +
+  labs(title = "Distribution of Transcripts by Role")
+```
+
+### Group conversational partners
+
+Grouping based on Bronfenbrenner’s ecological systems
+
+Group 1: Mother (MOT)
+
+Group 2: Father (FAT)
+
+Group 3: Adult with exisitng relationship (ADT): Grandmother, Grandfather, Relative, Caretaker, Caregiver, Teacher
+
+Group 4: Siblings (SIB): Sister, Brother, Sibling
+
+Group 5: Other children (OTH_C): Child, Friend, Playmate, Student, Girl, Teenager
+
+Group 6: Other adults (Exosystem) (OTH_A) : Investigator, Media, Unidentified, Adult, Visitor, Participants, Environment, Male, Uncertain
+
+```{r}
+role_category_map <- tibble(
+  speaker_role = c(
+    # two parents 
+    "Mother","Father",
+    
+    #adult with exsiting relationship (exp parents)
+  "Grandmother", "Grandfather", "Relative", "Caretaker", "Caregiver","Teacher",
+    
+    #siblings 
+    "Sister", "Brother", 
+    "Sibling",
+    
+    #other child 
+    "Child", "Friend", "Playmate", "Student", "Girl", "Teenager",
+    
+    #other adults
+    "Unidentified", "Adult", "Media", "Visitor",
+    "Participant", "Environment", "Male", "Uncertain","Investigator"
+  ),
+  role_category = c(
+    #group 1 and 2: keep parents as they are
+    "MOT", "FAT",
+    
+    #group 3: adults with relationship
+    rep("ADT", 6),
+    
+    #group 4: sibling
+    rep("SIB", 3),
+    
+    #group 5: other children 
+    rep ("OTH_C", 6),
+    
+    #group 6: other adult
+    rep("OTH_A", 9)
+  )
+)
+
+count_by_role_exc_child <- count_by_role_exc_child %>%
+  left_join(role_category_map, by = "speaker_role")
+count_by_role <- count_by_role %>% 
+  left_join(role_category_map, by = "speaker_role")
+
+count_by_role_exc_child
+
+#Sanity check 
+count_by_role_exc_child %>%
+  filter(is.na(role_category)) %>%
+  distinct(speaker_role)
+```
+
+Number of participant, transcripts, utterance by each category
+
+```{r}
+count_by_category <- count_by_role_exc_child %>%
+  group_by(role_category) %>%
+  summarise(
+    n_speakers    = sum(n_speakers),
+    n_transcripts = sum(n_transcripts),
+    n_utterances  = sum(n_utterances),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(n_transcripts))
+
+count_by_category
 ```
 
 Load information on the target child: number of target child, sex, age
 
 ```{r,echo=TRUE, results="show"}
 d_target_child <- get_participants(role = "target_child", collection = "Eng-NA")
-head(d_target_child)
+count_by_role
 
-count_targetchild <- nrow(d_target_child)
-count_targetchild
-
-count_sex <- d_target_child %>%
+sum_sex <- d_target_child %>%
   count(sex)
-count_sex
+sum_sex
 
 sum_age <-d_target_child %>%
   summarise(
@@ -72,13 +194,13 @@ sum_age
 Load information about the SES and education
 
 ```{r,echo=TRUE, results="show"}
-count_ses <- d_participants %>%
+sum_ses <- d_target_child %>%
   count(ses)
-count_ses
+sum_ses
 
-count_education <-d_participants %>%
+sum_education <-d_target_child %>%
   count(education)
-count_education
+sum_education
 ```
 
 # RQ1
@@ -86,7 +208,6 @@ count_education
 Identify if any transcripts, only the target child is speaking (no conversational partner speech)
 
 ```{r}
-ut_eng_na <- get_utterances(collection = "Eng-NA")
 # Identify only-child transcripts
 onlychild_ids <- ut_eng_na %>%
   group_by(transcript_id) %>%
@@ -94,6 +215,7 @@ onlychild_ids <- ut_eng_na %>%
   filter(only_child == TRUE) %>%
   pull(transcript_id)
 
+#transcript:
 eng_na_rq1 <- d_eng_na %>%
   filter(!transcript_id %in% onlychild_ids)
 head(eng_na_rq1)
@@ -101,16 +223,15 @@ head(eng_na_rq1)
 count_transcripts_rq1 <- nrow(eng_na_rq1)
 count_transcripts_rq1
 #number of transcripts where there is a conversational partner
-
-
 ```
 
-Pull out all conversational patner's turns
+Pull out all conversational partner's turns
 
 ```{r}
 ut_eng_na_rq1 <- ut_eng_na %>%
   filter(!transcript_id %in% onlychild_ids) %>%   
-  filter(speaker_code != "CHI")      
+  filter(speaker_role != "Target_Child") %>% 
+  left_join(role_category_map, by = "speaker_role")      #add new role category
 ```
 
 Create target word list
@@ -121,6 +242,7 @@ file_lex <- read.csv("~/Desktop/R_WD/ThesisDataAnalysis/1987-Affectivelexicon-fo
 emotion_words <-file_lex$Word
 emotion_words <- unique(na.omit(emotion_words))
 head(emotion_words)
+length(emotion_words)
 ```
 
 identify how many emotion words each utterance used
@@ -148,33 +270,54 @@ head(utt_partners_emotions)
 
 ```
 
-Across all transcripts, how many times each words are used
+Across all transcripts, how many times each words are used + frequency
 
 ```{r}
 total_emotion_words <- utt_partners_emotions %>%
   summarise(across(all_of(emotion_words), sum, na.rm = TRUE))
+#get raw totals
 
+
+emotion_counts_long <- total_emotion_words %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "word",
+    values_to = "count"
+  ) %>%
+  mutate(freq_per_1000 = (count / sum(count))*1000)
+#convert to long + compute frequency 
+
+emotion_counts_long
+```
+
+Save core objects before next step
+
+```{r}
+save(
+  utt_partners_emotions,
+  file = "Emotion word use per utterance_RQ1"
+)
 ```
 
 #### Problem 1. some of the words are not used as emotion words. e.g. like, well, kind.
 
-Step 1: get a list of the 50 most used emotion words
+#### Method: human-in-the-loop NLP filter
+
+##### Step 1: Flag ambiguous words from main emotion word list
+
+Step 2:
+
+##### get a list of the 50 most used emotion words
 
 ```{r}
-long_total_emotion_words <- total_emotion_words %>%
- pivot_longer(
-    cols = everything(),
-    names_to = "word",
-    values_to = "total_count"
-  )
-top50_words <- long_total_emotion_words %>%
-  arrange(desc(total_count)) %>%
+top50_words <- emotion_counts_long %>%
+  arrange(desc(count)) %>%
   slice(1:50)
 
-ggplot(top50_words, aes(x = reorder(word, total_count), 
-                        y = total_count)) +
+ggplot(top50_words, aes(x = reorder(word, count), 
+                        y = count)) +
   geom_col(fill = "steelblue") +
-  geom_text(aes(label = total_count),
+  geom_text(aes(label = count),
             hjust = -0.1, size = 3) +     # <- adds labels
   coord_flip() +
   theme_minimal() +
@@ -183,7 +326,7 @@ ggplot(top50_words, aes(x = reorder(word, total_count),
     y = "Total Count",
     title = "Top 50 Most Frequent Emotion Words"
   ) +
-  ylim(0, max(top50_words$total_count) * 1.1)  # extra space for labels
+  ylim(0, max(top50_words$count) * 1.1)  # extra space for labels
 ```
 
 I need to tackle the ambiguous words by following steps
@@ -222,12 +365,14 @@ write.csv(
 
 e.g. Part of Speech tagging (well, like) , rule based exclusion (kind of), machine learning (?)
 
+Produce a manual to tag the ambiguous words?
+
 emotion_counts \<- utt_partners_emotions %\>% group_by(transcript_id) %\>% summarise( total_emotion_words = sum(emotion_count, na.rm = TRUE), total_emotion_utterances = sum(emotion_count \> 0) )
 
 Sanity check:
 
 ```{r}
-id_to_check <- "3893"   # replace with a transcript id
+id_to_check <- "3778"   # replace with a transcript id
 
 transcript_check <- utt_partners_emotions %>%
   filter(transcript_id == id_to_check) %>%
