@@ -1,0 +1,305 @@
+---
+title: "NLP exploration_Dec31"
+output: html_document
+date: "2025-12-31"
+---
+```
+
+
+##### : human-in-the-loop NLP filter 
+
+##### step 4: Use NLP to filter contexts that are “not emotion talk”
+
+##### Based on windowed utterances/ all ambiguous words together
+
+```{r}
+# extract context windows for one utterance ---
+extract_windows_one <- function(gloss, id, k = 3, ambiguous_words) {
+  toks <- unlist(str_split(gloss, "\\s+"))
+  if (length(toks) == 0) return(tibble())
+  
+  hit_pos <- which(toks %in% ambiguous_words)
+  if (length(hit_pos) == 0) return(tibble())
+  
+  map_dfr(hit_pos, function(p) {
+    left  <- max(1, p - k)
+    right <- min(length(toks), p + k)
+    tibble(
+      id      = id,
+      amb_word    = toks[p],
+      position    = p,
+      window_k    = k,
+      window_text = paste(toks[left:right], collapse = " "),
+      left_context  = paste(toks[left:(p-1)], collapse = " "),
+      right_context = paste(toks[(p+1):right], collapse = " ")
+    )
+  })
+}
+
+# --- Apply to all utterances ---
+k <- 3  # change to 4/5 later
+windows_df <- pmap_dfr(
+  list(amb_utt$gloss, amb_utt$id),
+  ~ extract_windows_one(..1, ..2, k = k, ambiguous_words = ambiguous_words)
+)
+
+# Join back original utterance text if you want
+windows_df <- windows_df %>%
+  left_join(amb_utt %>% select(id, gloss), by = "id")
+
+```
+
+Run clustering based on windowed text
+
+```{r}
+corp <- corpus(windows_df$window_text)
+
+toks <- tokens(corp, remove_punct = TRUE, remove_numbers = TRUE) %>%
+  tokens_tolower() %>%
+  tokens_remove(stopwords("en"))
+
+dfm_mat <- dfm(toks) %>%
+  dfm_trim(min_docfreq = 3)
+
+dfm_tfidf <- dfm_tfidf(dfm_mat)
+X <- as.matrix(dfm_tfidf)
+
+svd_out <- irlba(X, nv = 50)
+emb <- svd_out$u %*% diag(svd_out$d)
+
+set.seed(123)
+k_clusters <- 6
+km <- kmeans(emb, centers = k_clusters, nstart = 20)
+
+windows_df$cluster <- km$cluster
+
+```
+
+Inspect clusters
+
+```{r}
+inspect_clusters<-windows_df %>%
+  group_by(cluster) %>%
+  slice_sample(n = 20) %>%
+  ungroup() %>%
+  select(cluster, amb_word, window_text, gloss)
+inspect_clusters
+
+write.csv(inspect_clusters, "ambiguous_windows_clustered.csv", row.names = FALSE)
+
+```
+
+##### Based on utterances/ all ambiguous words together
+
+```{r}
+# Use whichever text column you have
+texts <- amb_utt$gloss
+
+corp <- corpus(texts)
+
+toks <- tokens(
+  corp,
+  remove_punct = TRUE,
+  remove_symbols = TRUE,
+  remove_numbers = TRUE
+) %>%
+  tokens_tolower()
+
+# Optional: remove stopwords (often helps), but keep "not" if you care about negation
+toks <- tokens_remove(toks, pattern = stopwords("en"))
+
+dfm_mat <- dfm(toks)
+
+# Drop very rare terms (tune min_docfreq if needed)
+dfm_mat <- dfm_trim(dfm_mat, min_docfreq = 5)
+
+# TF–IDF weighting
+dfm_tfidf <- dfm_tfidf(dfm_mat)
+
+```
+
+```{r}
+
+X <- as.matrix(dfm_tfidf)
+
+# SVD to reduce noise; 50–200 dims is typical
+svd_out <- irlba(X, nv = 100)
+emb <- svd_out$u %*% diag(svd_out$d)  # utterance embeddings
+
+set.seed(123)
+k <- 5  # try 4–8
+km <- kmeans(emb, centers = k, nstart = 20)
+
+amb_utt$cluster <- km$cluster
+
+```
+
+```{r, echo=TRUE, results="show"}
+top_terms <- lapply(1:k, function(c){
+  rows <- which(amb_utt$cluster == c)
+  colMeans(X[rows, , drop = FALSE]) %>%
+    sort(decreasing = TRUE) %>%
+    head(15)
+})
+
+top_terms
+
+set.seed(1)
+cluster <- amb_utt %>%
+  group_by(cluster) %>%
+  slice_sample(n = 20) %>%
+  ungroup() %>%
+  select(cluster, gloss)
+cluster
+write.csv(cluster, "ambiguous_utterance_clustered.csv", row.names = FALSE)
+
+
+```
+
+clustering word by word
+
+```{r}
+nlp_target <- "like" 
+k <- 3   
+
+windows_target <- windows_df %>%
+  filter(amb_word == nlp_target)
+
+nrow(windows_target)
+
+corp <- corpus(windows_target$window_text)
+
+toks <- tokens(corp, remove_punct = TRUE, remove_numbers = TRUE) %>%
+  tokens_tolower() %>%
+  tokens_remove(setdiff(stopwords("en"), "not"))  # keep negation
+
+dfm_mat <- dfm(toks) %>%
+  dfm_trim(min_docfreq = 3)
+
+dfm_tfidf <- dfm_tfidf(dfm_mat)
+X <- as.matrix(dfm_tfidf)
+
+svd_out <- irlba(X, nv = 30)   # short windows → small nv is enough
+emb <- svd_out$u %*% diag(svd_out$d)
+
+set.seed(123)
+k_clusters <- 4                # try 3–5
+km <- kmeans(emb, centers = k_clusters, nstart = 20)
+
+windows_target$cluster <- km$cluster
+
+set.seed(1)
+like_clustered <- windows_target %>%
+  group_by(cluster) %>%
+  slice_sample(n = 25) %>%
+  ungroup() %>%
+  select(cluster, window_text, gloss)
+like_clustered
+
+
+like_top_terms <- lapply(sort(unique(windows_target$cluster)), function(c){
+  rows <- which(windows_target$cluster == c)
+  term_means <- colMeans(X[rows, , drop = FALSE])
+  tibble(
+    cluster = c,
+    term = names(sort(term_means, decreasing = TRUE))[1:12],
+    score = sort(term_means, decreasing = TRUE)[1:12]
+  )
+}) %>% bind_rows()
+like_top_terms
+
+write.csv(like_clustered, "like_clustered.csv", row.names = FALSE)
+write.csv(like_top_terms, "like_top_terms.csv", row.names = FALSE)
+
+
+```
+
+reviewing the clustered and top-terms, now my model is being hijacked by "looks like" and "look like" which is obviously not an emotion word.
+
+```{r}
+look_like_count <- windows_target %>%
+  mutate(window_text_l = stringr::str_to_lower(window_text)) %>%
+  summarise(
+    n_look_like = sum(stringr::str_detect(window_text_l, "\\blooks?\\s+like\\b")),
+    total_windows = n(),
+    proportion = n_look_like / total_windows
+  )
+
+look_like_count
+
+#broken down by cluster
+look_like_by_cluster <- windows_target %>%
+  mutate(window_text_l = str_to_lower(window_text)) %>%
+  group_by(cluster) %>%
+  summarise(
+    n_windows = n(),
+    n_look_like = sum(str_detect(window_text_l, "\\blooks?\\s+like\\b")),
+    prop_look_like = n_look_like / n_windows,
+    .groups = "drop"
+  )
+
+look_like_by_cluster
+```
+
+in cluster 2 and 3, most of the utterances are containing "look like" or "looks like". so I am going to exclude it.
+
+```{r}
+windows_like_clean <- windows_target %>%
+  mutate(window_text_l = str_to_lower(window_text)) %>%
+  filter(!str_detect(window_text_l, "\\blooks?\\s+like\\b"))
+nrow(windows_like_clean)
+
+corp <- corpus(windows_like_clean$window_text)
+
+#remove um from the utterances (not removing utterances including um)
+toks <- tokens(corpus(windows_like_clean$window_text),
+               remove_punct = TRUE,
+               remove_numbers = TRUE) %>%
+  tokens_tolower() %>%
+  tokens_remove(c(setdiff(stopwords("en"), "not"), "um"))
+
+dfm_mat <- dfm(toks) %>%
+  dfm_trim(min_docfreq = 3)
+
+dfm_tfidf <- dfm_tfidf(dfm_mat)
+X <- as.matrix(dfm_tfidf)
+
+svd_out <- irlba(X, nv = 30)
+emb <- svd_out$u %*% diag(svd_out$d)
+
+set.seed(123)
+k_clusters <- 3   # start with 3 now that look-like is gone
+km <- kmeans(emb, centers = k_clusters, nstart = 20)
+
+windows_like_clean$cluster <- km$cluster
+set.seed(1)
+like_clean_clustered <- windows_like_clean %>%
+  group_by(cluster) %>%
+  slice_sample(n = 25) %>%
+  ungroup() %>%
+  select(cluster, window_text, gloss)
+
+like_clean_top_terms <- lapply(sort(unique(windows_like_clean$cluster)), function(c){
+  rows <- which(windows_like_clean$cluster == c)
+  term_means <- colMeans(X[rows, , drop = FALSE])
+  tibble(
+    cluster = c,
+    term = names(sort(term_means, decreasing = TRUE))[1:12],
+    score = sort(term_means, decreasing = TRUE)[1:12]
+  )
+}) %>% bind_rows()
+
+write.csv(like_clean_clustered, "like_clean_clustered.csv", row.names = FALSE)
+write.csv(like_clean_top_terms, "like_clean_top_terms.csv", row.names = FALSE)
+
+
+```
+
+-\> each word might need different method.
+
+e.g. Part of Speech tagging (well, like) , rule based exclusion (kind of), machine learning (?)
+
+Produce a manual to tag the ambiguous words?
+
+emotion_counts \<- utt_partners_emotions %\>% group_by(transcript_id) %\>% summarise( total_emotion_words = sum(emotion_count, na.rm = TRUE), total_emotion_utterances = sum(emotion_count \> 0) )
+
