@@ -148,7 +148,7 @@ serve as a definitive disambiguation method.
 
 </div>
 
-### Step 4: Method 2 — POS and dependency-based disambiguation (spaCy)
+### Step 4: Method 2 — POS and dependency-based disambiguation (spaCy) (used in the coding)
 
 Given the limitations of unsupervised clustering, a **rule-based
 linguistic approach** was applied to the word *like* using **spaCy via
@@ -175,7 +175,48 @@ modal preference questions (*would/do/can you like …*)
 All other POS categories (e.g., ADP, discourse-marker uses) were
 excluded.
 
-### 
+#### Word-level Rules 
+
++----------------+-----------------+----------------+----------------+
+| Word           | Inclusion Rules | Exclusion      | Notes          |
+|                | (1st)           | Rules (2nd)    |                |
++================+=================+================+================+
+| Like           | POS=VERB + if   |                |                |
+|                | used as a       |                |                |
+|                | preference      |                |                |
+|                | checking        |                |                |
+|                | (would\|could   |                |                |
+|                | \|can\|do\|did) |                |                |
++----------------+-----------------+----------------+----------------+
+| Well           | POS = ADJ + ADV | single-word    |                |
+|                | (he is doing    | utterances     |                |
+|                | well)           | (e.g. well.),  |                |
+|                |                 | se             |                |
+|                |                 | ntence-initial |                |
+|                |                 | (e.g. well     |                |
+|                |                 | this is        |                |
+|                |                 | because... )   |                |
+|                |                 | as well (e.g.  |                |
+|                |                 | I like it as   |                |
+|                |                 | well; i like a |                |
+|                |                 | as well as b)  |                |
++----------------+-----------------+----------------+----------------+
+| Kind           | POS = ADJ       | category word  | still          |
+|                |                 | (e.g."that     | including      |
+|                |                 | kind" )        | (e.g.          |
+|                |                 |                | strawberry     |
+|                |                 |                | kind) may need |
+|                |                 |                | to explicitly  |
+|                |                 |                | exclude.       |
++----------------+-----------------+----------------+----------------+
+|                |                 |                |                |
++----------------+-----------------+----------------+----------------+
+|                |                 |                |                |
++----------------+-----------------+----------------+----------------+
+
+#### 
+
+rules:
 
 Now trying 30th Dec (NLP) - clustering not making sense as its based on
 utterances, not related to word-level usage
