@@ -1,0 +1,564 @@
+---
+title: "07RQ1DataAnalysis"
+format: html
+editor: visual
+---
+
+```{r setup, include=FALSE}
+ knitr::opts_chunk$set( echo = FALSE, # hide code by default 
+                        message = FALSE, # hide messages 
+                        warning = FALSE, # hide warnings 
+                        results = "hide" # hide printed output from code 
+                        )
+
+```
+
+Prep work space and load packages
+
+```{r}
+source(here::here("00_setup.R"))
+library(lme4)
+library(splines)
+library(glmmTMB)
+```
+
+Load cleaned dataset
+
+```{r}
+utt_partners_emotions_merged <- readRDS( here("01Data","02Derived","FINAL_utt_partners_emotions_merged.rds") )
+
+file_lex <- read.csv("~/Desktop/R_WD/ThesisDataAnalysis/1987-Affectivelexicon-foundations_words.csv", stringsAsFactors = FALSE) 
+emotion_words <-file_lex$Word
+```
+
+## Descriptive Stats Across all transcripts, how many times each words are used + frequency
+
+```{r}
+
+total_word_count <- utt_partners_emotions_merged %>%
+  summarise(
+    total_words = sum(str_count(gloss_lower, "\\b\\w+\\b"))
+  ) %>%
+  pull(total_words)
+
+total_emotion_words_merged <- utt_partners_emotions_merged %>%
+  summarise(
+    across(all_of(emotion_words), ~ sum(.x, na.rm = TRUE)),
+   emotion_count = sum(emotion_count, na.rm = TRUE), .groups = "drop"
+  )
+
+emotion_counts_long_merged <- total_emotion_words_merged %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "word",
+    values_to = "count"
+  ) %>%
+  mutate(
+    freq_per_1000_words = (count / total_word_count) * 1000
+  ) %>%
+  arrange(desc(freq_per_1000_words))
+
+emotion_counts_long_merged
+
+write.csv(
+  emotion_counts_long_merged,
+  "MERGED emotion word count and frequency.csv",
+  row.names = FALSE
+)
+```
+
+By Role
+```{r}
+total_emotion_words_by_role_merged <- utt_partners_emotions_merged %>%
+  group_by(role_category) %>%
+  summarise(
+    across(all_of(emotion_words), ~ sum(.x, na.rm = TRUE)),
+    emotion_count = sum(emotion_count, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+total_word_count_by_role_merged <- utt_partners_emotions_merged %>%
+  mutate(word_count = str_count(gloss_lower, "\\b\\w+\\b")) %>%
+  group_by(role_category) %>%
+  summarise(
+    total_words = sum(word_count, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+emotion_counts_long_by_role_merged <- total_emotion_words_by_role_merged %>%
+  left_join(total_word_count_by_role_merged, by = "role_category") %>%
+  pivot_longer(
+    cols = -c(role_category, total_words),
+    names_to = "word",
+    values_to = "count"
+  ) %>%
+  mutate(
+    freq_per_1000_words = (count / total_words) * 1000
+  ) %>%
+  arrange(role_category, desc(freq_per_1000_words))
+
+total_emotion_counts_long_by_role_merged <- emotion_counts_long_by_role_merged %>%
+  filter(
+    word == "emotion_count"
+  ) %>% 
+  select(role_category,count,freq_per_1000_words)
+total_emotion_counts_long_by_role_merged
+
+write.csv(
+  total_emotion_counts_long_by_role_merged,
+  here("03Output", "emotion word count and frequency_by role.csv"),
+  row.names = FALSE
+)
+```
+Prep Dataset for RQ1 
+
+```{r}
+utt_model_df <- utt_partners_emotions_merged %>%
+  select(
+    # identifiers
+    id,
+    target_child_id,
+    speaker_id,
+    corpus_id,
+    transcript_id,
+    
+    # predictors
+    role_category,
+    target_child_age,
+    target_child_sex,
+    
+    # outcome / exposure
+    emotion_count,
+    num_tokens
+  )
+
+utt_model_df %>%
+count(!is.na(target_child_sex), !is.na(target_child_age))
+
+utt_model_df_rq1 <- utt_model_df %>%
+  filter(num_tokens > 0) %>% 
+ filter(!is.na(target_child_age), !is.na(target_child_sex))
+
+```
+### prep transcript-level dataset
+```{r}
+transcript_id <- "transcript_id"
+
+df_tr <- utt_model_df_rq1 %>%
+  group_by(
+    !!sym(transcript_id),
+    target_child_id,
+    role_category,
+    target_child_age,
+    target_child_sex
+  ) %>%
+  summarise(
+    emotion_count = sum(emotion_count, na.rm = TRUE),
+    num_tokens    = sum(num_tokens, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(num_tokens > 0)
+
+m_tr_nb <- glmmTMB(
+  emotion_count ~
+    role_category * ns(target_child_age, df = 3) +
+    target_child_sex +
+    offset(log(num_tokens)) +
+    (1 | target_child_id),
+  family = nbinom2(),
+  data = df_tr
+)
+m_tr_nb
+```
+
+### prediction and plotting
+```{r}
+# observed age range
+age_min_m <- min(df_tr$target_child_age, na.rm = TRUE)
+age_max_m <- max(df_tr$target_child_age, na.rm = TRUE)
+age_min_y <- age_min_m / 12
+age_max_y <- age_max_m / 12
+
+age_years  <- seq(age_min_y, age_max_y, by = 0.1) #sequence of age by 0.1 years 
+age_months <- age_years * 12
+
+role_levels <- sort(unique(df_tr$role_category))
+sex_levels  <- sort(unique(df_tr$target_child_sex))
+ref_sex     <- sex_levels[1]
+
+new_data <- expand.grid( #build grid of all possible combinations 
+  target_child_age = age_months,
+  role_category = role_levels,
+  target_child_sex = ref_sex,
+  num_tokens = 1000 #sets offset
+)
+
+#convert to factors and match original model
+new_data$role_category    <- factor(new_data$role_category, levels = role_levels)
+new_data$target_child_sex <- factor(new_data$target_child_sex, levels = sex_levels)
+new_data$target_child_age_years <- new_data$target_child_age / 12
+
+pred <- predict(
+  m_tr_nb,
+  newdata = new_data,
+  type = "link",
+  se.fit = TRUE,
+  re.form = NA
+)
+
+#transforming results 
+new_data$fit_link <- pred$fit
+new_data$se_link  <- pred$se.fit
+new_data$fit      <- exp(new_data$fit_link)
+new_data$ci_lower <- exp(new_data$fit_link - 1.96 * new_data$se_link)
+new_data$ci_upper <- exp(new_data$fit_link + 1.96 * new_data$se_link)
+
+p <- ggplot(new_data,
+            aes(x = target_child_age_years, y = fit,
+                color = role_category, fill = role_category)) +
+  geom_line(linewidth = 1) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.2, colour = NA) +
+  scale_x_continuous(breaks = seq(0, 12, by = 1),
+                     limits = c(age_min_y, age_max_y)) +
+  coord_cartesian(ylim = c(0, 25)) +
+  labs(
+    title = "Emotion Words by Partner Role and Child Age",
+    x = "Age (years)",
+    y = "Expected Count Per 1,000 Words"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.title = element_blank(),
+    legend.position = "bottom",
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+print(p)
+
+#sanity check
+
+#check for overfitting
+
+# Add the raw rate to your original data frame
+df_tr <- df_tr %>%
+  mutate(rate_per_1000 = (emotion_count / num_tokens) * 1000)
+
+# Add geom_jitter to your existing plot 'p'
+p + geom_jitter(data = df_tr, 
+                aes(x = target_child_age/12, y = rate_per_1000, color = role_category),
+                alpha = 0.1, size = 0.5)
+
+age_summary <- df_tr %>%
+  mutate(age_bin = floor(target_child_age / 12)) %>%
+  group_by(age_bin) %>%
+  summarise(
+    n_transcripts = n(),
+    mean_rate_per_1000 = mean(rate_per_1000, na.rm = TRUE),
+    median_rate_per_1000 = median(rate_per_1000, na.rm = TRUE),
+    max_rate_per_1000 = max(rate_per_1000, na.rm = TRUE)
+  )
+age_summary
+print(p)
+
+
+summary(utt_model_df_rq1$emotion_count)
+quantile(utt_model_df_rq1$emotion_count, c(.9, .95, .99, .999), na.rm = TRUE)
+max(utt_model_df_rq1$emotion_count, na.rm = TRUE)
+table(utt_model_df_rq1$emotion_count, useNA="no")[1:10]
+```
+
+
+
+
+
+ 1000 *
+  sum(utt_partners_emotions_merged$emotion_count, na.rm = TRUE) /
+  sum(utt_partners_emotions_merged$num_tokens, na.rm = TRUE)
+ 
+ # total tokens that would appear in the DTM
+sum(df_child_tr[, word_columns])
+
+# emotion tokens in the same universe
+sum(df_child_tr$emotion_words)
+
+ 
+df_emo_per_tr_all <- utt_child_emotions %>%
+  group_by(transcript_id) %>%
+  summarise(
+    emotion_words_per_transcript = sum(emotion_count, na.rm = TRUE),
+    total_tokens = sum(num_tokens, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+summary(df_emo_per_tr_all$emotion_words_per_transcript)
+quantile(df_emo_per_tr_all$emotion_words_per_transcript,
+         probs = c(.05, .25, .5, .75, .95))
+
+
+
+df_child_rate <- utt_child_emotions %>%
+  group_by(transcript_id) %>%
+  summarise(
+    emo = sum(emotion_count),
+    tok = sum(num_tokens),
+    rate_per_1000 = 1000 * emo / tok,
+    .groups = "drop"
+  ) %>%
+  filter(tok > 0)
+
+summary(df_child_rate$rate_per_1000)
+quantile(df_child_rate$rate_per_1000, c(.25,.5,.75,.9,.95), na.rm=TRUE)
+mean(df_child_rate$rate_per_1000, na.rm=TRUE)
+
+```
+
+Test 
+Overdispersion was assessed using simulation-based residual diagnostics (DHARMa). Although the dispersion test was statistically significant due to the very large sample size, the dispersion ratio was close to 1 (≈1.04), indicating minimal overdispersion. We therefore report Poisson mixed-effects models with a log offset for utterance length.
+
+
+```{r}
+m_pois <- glmer(
+  emotion_count ~
+    role_category * target_child_age +
+    offset(log(num_tokens)) +
+    (1 | target_child_id) +
+    (1 | speaker_id),
+  family = poisson,
+  data = utt_model_df_rq1
+)
+
+m_pois
+
+overdisp_fun <- function(model) {
+  rdf <- df.residual(model)
+  rp  <- residuals(model, type = "pearson")
+  Pearson.chisq <- sum(rp^2)
+  ratio <- Pearson.chisq / rdf
+  pval  <- pchisq(Pearson.chisq, df = rdf, lower.tail = FALSE)
+  c(chisq = Pearson.chisq, ratio = ratio, p = pval)
+}
+
+overdisp_fun(m_pois)
+```
+
+```{r}
+m_null <- glmer(
+  emotion_count ~
+    offset(log(num_tokens)) +
+    (1 | target_child_id) +
+    (1 | speaker_id),
+  family = poisson,
+  data = utt_model_df_rq1
+)
+
+m_main_nb <- glmmTMB(
+  emotion_count ~
+    role_category * ns(target_child_age, df = 4) +
+    target_child_sex +
+    offset(log(num_tokens)) +
+    (1 | target_child_id) +
+    (1 | speaker_id),
+  family = nbinom2(),
+  data = utt_model_df_rq1
+)
+
+
+saveRDS(
+  m_main_nb,
+  file = "m_main_nb_glmmTMB.rds",
+  compress = "xz"
+)
+
+m_main_nb <- readRDS("m_main_nb_glmmTMB.rds")
+
+library(ggeffects)
+library(ggplot2)
+
+
+age_grid <- seq(
+  from = min(utt_model_df_rq1$target_child_age, na.rm = TRUE),
+  to   = max(utt_model_df_rq1$target_child_age, na.rm = TRUE),
+  length.out = 100
+)
+library(emmeans)
+
+emm <- emmeans(
+  m_main_nb,
+  ~ role_category | target_child_age,
+  at = list(
+    target_child_age = age_grid,
+    num_tokens = 1000   # THIS IS CRITICAL
+  ),
+  type = "response"
+)
+
+
+emm_df <- as.data.frame(emm)
+
+library(ggplot2)
+
+p <- ggplot(emm_df,
+            aes(x = target_child_age, y = response, colour = role_category)) +
+  geom_line(size = 1.2) +
+  geom_ribbon(aes(ymin = asymp.LCL, ymax = asymp.UCL, fill = role_category),
+              alpha = 0.15, colour = NA) +
+  coord_cartesian(ylim = c(0, 25)) +
+  labs(x="Child age (months)",
+       y="Predicted emotion words per 1000 tokens",
+       colour="Partner role", fill="Partner role") +
+  theme_classic()
+
+p
+
+
+nrow(utt_model_df_rq1)
+
+sapply(utt_model_df_rq1[c("target_child_id","speaker_id","role_category")], \(x) length(unique(x)))
+table(utt_model_df_rq1$emotion_count == 0)
+summary(utt_model_df_rq1$num_tokens)
+
+m_main <- glmer(
+  emotion_count ~
+    role_category * ns(target_child_age, df = 4) +
+    target_child_sex +
+    offset(log(num_tokens)) +
+    (1 | target_child_id) +
+    (1 | speaker_id),
+  family = poisson,
+  data = utt_model_df_rq1
+)
+
+library(splines)
+
+
+m_main
+```
+```{r}
+
+# ---- 1) Define observed age range (months) and build an age grid in YEARS ----
+age_min_m <- min(utt_model_df_rq1$target_child_age, na.rm = TRUE)  # ~ 5.99
+age_max_m <- max(utt_model_df_rq1$target_child_age, na.rm = TRUE)  # ~ 144.43
+
+age_min_y <- age_min_m / 12
+age_max_y <- age_max_m / 12
+age_max_y
+
+age_years  <- seq(age_min_y, age_max_y, by = 0.1)
+age_months <- age_years * 12
+
+# ---- 2) Get robust "levels" even if variables are character ----
+role_levels <- sort(unique(utt_model_df_rq1$role_category))
+sex_levels  <- sort(unique(utt_model_df_rq1$target_child_sex))
+
+# choose a reference sex that exists in your data
+# (change this if you want a specific level, e.g., "female")
+ref_sex <- sex_levels[1]
+
+# ---- 3) Build prediction grid (set num_tokens=1000 for "per 1,000 words") ----
+new_data <- expand.grid(
+  target_child_age = age_months,
+  role_category = role_levels,
+  target_child_sex = ref_sex,
+  num_tokens = 1000
+)
+
+# Ensure factor coding matches what the model expects
+new_data$role_category    <- factor(new_data$role_category, levels = role_levels)
+new_data$target_child_sex <- factor(new_data$target_child_sex, levels = sex_levels)
+
+# Add age in years for plotting
+new_data <- new_data %>%
+  mutate(target_child_age_years = target_child_age / 12)
+
+# ---- 4) Predict population-level (fixed effects only), with SEs ----
+pred <- predict(
+  m_main_nb,
+  newdata = new_data,
+  type = "link",     # get link-scale + SE, then transform ourselves
+  se.fit = TRUE,
+  re.form = NA       # IMPORTANT: exclude random effects for clean trajectories
+)
+
+# ---- 5) Build response-scale fit + 95% CI ----
+new_data <- new_data %>%
+  mutate(
+    fit_link = pred$fit,
+    se_link  = pred$se.fit,
+    ci_lower_link = fit_link - 1.96 * se_link,
+    ci_upper_link = fit_link + 1.96 * se_link,
+    fit     = exp(fit_link),
+    ci_lower = exp(ci_lower_link),
+    ci_upper = exp(ci_upper_link)
+  )
+
+# Optional: prevent ribbons from extending below 0 (not necessary, but tidy)
+new_data <- new_data %>%
+  mutate(
+    ci_lower = pmax(ci_lower, 0)
+  )
+
+# ---- 6) Plot (match your supervisor-style: line + ribbon, x in years, y 0–25) ----
+p_roles <- ggplot(
+  new_data,
+  aes(x = target_child_age_years, y = fit, color = role_category, fill = role_category)
+) +
+  geom_line(linewidth = 1) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.2, colour = NA) +
+  scale_x_continuous(
+    breaks = seq(floor(age_min_y), ceiling(age_max_y), by = 1),
+    limits = c(age_min_y, age_max_y)
+  ) +
+  coord_cartesian(ylim = c(0, 25)) +
+  labs(
+    title = "Emotion Words by Partner Role and Child Age",
+    x = "Age (years)",
+    y = "Expected Count Per 1,000 Words"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 12),
+    axis.title.x = element_text(size = 12, face = "bold"),
+    axis.title.y = element_text(size = 12, face = "bold"),
+    axis.text = element_text(size = 12, color = "black"),
+    axis.ticks = element_line(color = "black"),
+    legend.title = element_blank(),
+    legend.position = "bottom",
+    legend.text = element_text(size = 12),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.margin = margin(1, 1, 1, 1, "cm")
+  )
+
+print(p_roles)
+```
+
+
+
+```{r}
+audit_my <- ut_eng_na_rq1 %>%
+  mutate(gloss_lower = tolower(gloss)) %>%
+  filter(transcript_id %in% tr_ids) %>%
+  summarise(
+    emo_tokens = sum(gloss_lower %in% emotion_words, na.rm = TRUE),
+    total_tokens = n(),
+    .by = transcript_id
+  )
+audit_my
+audit_wide <- utt_partners_emotions %>%   # the wide table you bind_cols'd onto
+  filter(transcript_id %in% tr_ids) %>%
+  summarise(
+    emo_tokens_wide = rowSums(across(all_of(emotion_words)), na.rm = TRUE),
+    .by = transcript_id
+  )
+audit_wide
+audit_wide
+  audit_my %>%
+  inner_join(audit_wide, by = "transcript_id") %>%
+  mutate(diff = emo_tokens - emo_tokens_wide)
+
+check <- utt_partners_emotions_merged %>% 
+filter(transcript_id == "3676")
+check
+```
+  

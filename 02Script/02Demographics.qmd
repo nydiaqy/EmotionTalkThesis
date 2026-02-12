@@ -1,0 +1,161 @@
+---
+title: "02Demographics"
+format: html
+editor: visual
+---
+
+```{r setup, include=FALSE}
+ knitr::opts_chunk$set( echo = FALSE, # hide code by default 
+                        message = FALSE, # hide messages 
+                        warning = FALSE, # hide warnings 
+                        results = "hide" # hide printed output from code 
+                        )
+
+```
+
+# Demographics
+
+Prep work space and load packages
+
+```{r}
+source("00_setup.R")
+```
+
+Load CHILDES transcripts/ utterance dataframe in English-North America
+
+```{r,echo=TRUE, results="show"}
+d_eng_na  <- readRDS(here("01Data", "01Childes", "d_eng_na_transcripts.rds"))
+ut_eng_na <- readRDS(here("01Data", "01Childes", "ut_eng_na_utterances.rds"))
+head(ut_eng_na)
+
+```
+
+Load participant information: Number of Transcripts, transcripts, utterances by roles
+
+```{r,echo=TRUE, results="show"}
+count_transcripts <- nrow(d_eng_na)
+count_transcripts
+
+count_by_role <- ut_eng_na %>%
+  group_by(speaker_role) %>%
+  summarise(
+  n_speakers   = n_distinct(speaker_id),
+  n_transcripts = n_distinct(transcript_id),
+  n_utterances = n(),
+    .groups = "drop"
+  ) 
+#Order by number of transcripts
+count_by_role <- count_by_role %>%
+  arrange(desc(n_transcripts)) %>%
+  mutate(
+    speaker_role = factor(speaker_role,
+                          levels = speaker_role)
+  )
+
+count_by_role
+
+count_by_role_exc_child <- count_by_role %>% 
+  filter(speaker_role != "Target_Child")
+
+count_by_role_exc_child
+```
+
+Pie Chart showing number of transcripts by role excluding target child
+
+```{r}
+p_role_dist <- ggplot(count_by_role_exc_child,
+       aes(x = "", y = n_transcripts, fill = speaker_role)) +
+  geom_col(width = 1) +
+  coord_polar(theta = "y") +
+  theme_void() +
+  labs(title = "Distribution of Transcripts by Role")
+
+p_role_dist
+
+ggsave(
+  here("03Output", "fig_role_distribution.png"),
+  plot = p_role_dist,
+  width = 6,
+  height = 6,
+  dpi = 300
+)
+```
+
+### Group conversational partners
+
+Grouping based on Bronfenbrenner’s ecological systems
+
+Group 1: Mother (MOT)
+
+Group 2: Father (FAT)
+
+Group 3: Adult with existing relationship (ADT): Grandmother, Grandfather, Relative, Caretaker, Caregiver, Teacher
+
+Group 4: Siblings (SIB): Sister, Brother, Sibling
+
+Group 5: Other children (OTH_C): Child, Friend, Playmate, Student, Girl, Teenager
+
+Group 6: Other adults (Exosystem) (OTH_A) : Investigator, Media, Unidentified, Adult, Visitor, Participants, Environment, Male, Uncertain
+
+```{r}
+source(here("02Script", "03RoleMap.R"))
+
+count_by_role_exc_child <- count_by_role_exc_child %>%
+  left_join(role_category_map, by = "speaker_role")
+count_by_role <- count_by_role %>% 
+  left_join(role_category_map, by = "speaker_role")
+
+count_by_role_exc_child
+
+#Sanity check 
+count_by_role_exc_child %>%
+  filter(is.na(role_category)) %>%
+  distinct(speaker_role)
+```
+
+Number of participant, transcripts, utterance by each category
+
+```{r}
+count_by_category <- count_by_role_exc_child %>%
+  group_by(role_category) %>%
+  summarise(
+    n_speakers    = sum(n_speakers),
+    n_transcripts = sum(n_transcripts),
+    n_utterances  = sum(n_utterances),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(n_transcripts))
+
+count_by_category
+```
+
+Load information on the target child: number of target child, sex, age
+
+```{r,echo=TRUE, results="show"}
+d_target_child <- readRDS(here("01Data", "01Childes", "d_target_child.rds"))
+
+sum_sex <- d_target_child %>%
+  count(sex)
+sum_sex
+
+sum_age <-d_target_child %>%
+  summarise(
+    mean_age = mean(min_age, na.rm = TRUE),
+    sd_age = sd(min_age, na.rm = TRUE),
+    min_age = min(min_age, na.rm = TRUE),
+    max_age = max(max_age, na.rm = TRUE)
+  )
+sum_age
+```
+
+Load information about the SES and education
+
+```{r,echo=TRUE, results="show"}
+sum_ses <- d_target_child %>%
+  count(ses)
+sum_ses
+
+sum_education <-d_target_child %>%
+  count(education)
+sum_education
+```

@@ -1,0 +1,2536 @@
+---
+title: "06RQ1Pipeline"
+output: html_document
+execute:
+  dir: project
+
+---
+
+```{r setup, include=FALSE}
+ knitr::opts_chunk$set( echo = FALSE, # hide code by default 
+                        message = FALSE, # hide messages 
+                        warning = FALSE, # hide warnings 
+                        results = "hide" # hide printed output from code 
+                        )
+
+```
+
+Prep work space and load packages
+
+```{r}
+source(here::here("00_setup.R"))
+```
+
+Load CHILDES transcripts/ utterance dataframe in English-North America
+
+```{r,echo=TRUE, results="show"}
+d_eng_na  <- readRDS(here("01Data", "01Childes", "d_eng_na_transcripts.rds"))
+ut_eng_na <- readRDS(here("01Data", "01Childes", "ut_eng_na_utterances.rds"))
+
+file_lex <- read.csv("~/Desktop/R_WD/ThesisDataAnalysis/1987-Affectivelexicon-foundations_words.csv",
+                     stringsAsFactors = FALSE)
+emotion_words <-file_lex$Word
+```
+
+# RQ1 Dataframe Prep
+
+Identify if any transcripts, only the target child is speaking (no conversational partner speech)
+
+```{r}
+# Identify only-child transcripts
+onlychild_ids <- ut_eng_na %>%
+  group_by(transcript_id) %>%
+  summarise(
+    only_child = all(na.omit(speaker_code) == "CHI"),
+    .groups = "drop"
+  ) %>%
+  filter(only_child) %>%
+  pull(transcript_id)
+
+#sanity check
+length(onlychild_ids)               # how many such transcripts
+
+
+#transcript:
+eng_na_rq1 <- d_eng_na %>%
+  filter(!transcript_id %in% onlychild_ids)
+head(eng_na_rq1)
+
+count_transcripts_rq1 <- nrow(eng_na_rq1)
+count_transcripts_rq1
+#number of transcripts where there is a conversational partner
+```
+
+Pull main data
+
+```{r}
+utt_partners_emotions <- readRDS(here("01Data", "02Derived", "utt_partners_emotions.rds"))
+
+head(utt_partners_emotions)
+```
+
+Partner count
+
+```{r}
+
+partner_summary_table <- utt_partners_emotions %>%
+  # Step 1: count unique partner categories per transcript
+  group_by(transcript_id) %>%
+  summarise(
+    n_partner_categories = n_distinct(role_category, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  # Step 2: count how many transcripts fall into each category count
+  count(n_partner_categories, name = "n_transcripts") %>%
+  arrange(n_partner_categories)
+
+partner_summary_table
+
+```
+
+Across all transcripts, how many times each words are used + frequency
+
+```{r}
+
+total_word_count <- utt_partners_emotions %>%
+  summarise(
+    total_words = sum(str_count(gloss_lower, "\\b\\w+\\b"))
+  ) %>%
+  pull(total_words)
+
+total_emotion_words <- utt_partners_emotions %>%
+  summarise(
+    across(all_of(emotion_words), ~ sum(.x, na.rm = TRUE)),
+    emotion_count = sum(emotion_count, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+emotion_counts_long <- total_emotion_words %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "word",
+    values_to = "count"
+  ) %>%
+  mutate(
+    freq_per_1000_words = (count / total_word_count) * 1000
+  ) %>%
+  arrange(desc(freq_per_1000_words))
+
+write.csv(
+  emotion_counts_long,
+  "emotion word count and frequency.csv",
+  row.names = FALSE
+)
+
+emotion_counts_long
+```
+
+By Role
+
+```{r}
+total_emotion_words_by_role <- utt_partners_emotions %>%
+  group_by(role_category) %>%
+  summarise(
+    across(all_of(emotion_words), ~ sum(.x, na.rm = TRUE)),
+    emotion_count = sum(emotion_count, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+total_word_count_by_role <- utt_partners_emotions %>%
+  mutate(word_count = str_count(gloss_lower, "\\b\\w+\\b")) %>%
+  group_by(role_category) %>%
+  summarise(
+    total_words = sum(word_count, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+emotion_counts_long_by_role <- total_emotion_words_by_role %>%
+  left_join(total_word_count_by_role, by = "role_category") %>%
+  pivot_longer(
+    cols = -c(role_category, total_words),
+    names_to = "word",
+    values_to = "count"
+  ) %>%
+  mutate(
+    freq_per_1000_words = (count / total_words) * 1000
+  ) %>%
+  arrange(role_category, desc(freq_per_1000_words))
+
+total_emotion_counts_long_by_role <- emotion_counts_long_by_role %>%
+  filter(
+    word == "emotion_count"
+  )
+total_emotion_counts_long_by_role
+write.csv(
+  emotion_counts_long_by_role,
+  "emotion word count and frequency_by role.csv",
+  row.names = FALSE
+)
+
+
+
+```
+
+## Problem 1. Disambiguation. e.g. like, well, kind.
+
+### Step 1: Flag ambiguous words from main emotion word list
+
+
+get a list of emotion word count \>10
+
+```{r}
+emotion_words_gt10 <- emotion_counts_long %>%
+  filter(count > 10) %>%
+  pull(word)
+
+emotion_word_bins
+ggplot(top100_words, aes(x = reorder(word, count), 
+                        y = count)) +
+  geom_col(fill = "steelblue") +
+  geom_text(aes(label = count),
+            hjust = -0.1, size = 3) +     # <- adds labels
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    x = "Emotion Word",
+    y = "Total Count",
+    title = "Top 100 Most Frequent Emotion Words"
+  ) +
+  ylim(0, max(top100_words$count) * 1.1)  # extra space for labels
+
+emotion_words_gt10
+```
+
+Sample randomly up to 30 example utterance each word, if \<30, print all utterances
+
+```{r}
+
+examples_word <- map_dfr(emotion_words_gt10, function(w) {
+  
+  # all utterances where this word appears at least once
+  df_w <- utt_partners_emotions %>%
+    filter(.data[[w]] > 0)   # use the column named w
+  
+  # if no utterances contain this word, skip it
+  if (nrow(df_w) == 0) return(NULL)
+  
+  # how many to sample (max 20, but not more than we have)
+  n_samp <- min(20L, nrow(df_w))
+  
+  df_w %>%
+    slice_sample(n = n_samp) %>%
+    mutate(target_word = w)
+}) 
+
+write.csv(
+  examples_word,
+  "gt10words_20examples.csv",
+  row.names = FALSE
+)
+```
+
+### Step 2 :Subset utterances containing those words
+
+```{r}
+ambiguous_cols <- c(
+  #POS tagging
+  "like","well","kind","fine","blue","merry","moved","certain","high","touched","patient",
+  
+  #S-BERT
+  "lost","quiet",
+  "strong","low",
+  
+  #Manual
+  "rotten","pride","ill","tender","crushed","gloomy","faint","odd")
+ambiguous_cols
+
+
+ambiguous_word_counts <- emotion_counts_long %>%
+  filter(word %in% ambiguous_cols) %>%
+  select(word, count) %>%
+  arrange(desc(count))
+
+ambiguous_word_counts
+amb_utt <- utt_partners_emotions %>%
+  filter(if_any(all_of(ambiguous_cols), ~ .x > 0)) %>% mutate(
+    ambiguous_word = apply(
+      select(., all_of(ambiguous_cols)),
+      1,
+      function(x) {
+        paste(ambiguous_cols[x > 0], collapse = "|")
+      }
+    )
+  ) %>% 
+  select(ambiguous_word, id, gloss,role_category,gloss_lower)
+head(amb_utt)
+
+#sanity check
+amb_utt %>%
+  count(ambiguous_word, sort = TRUE)
+
+saveRDS(amb_utt, here("01Data", "02Derived", "amb_utterances.rds"))
+
+```
+
+### Step 3: POS and dependency-based disambiguation (spaCy)
+
+
+#### 3.1 Like
+
+new dataframe containing only like-included utterances + original utterance id.
+
+```{r}
+df_like <- readRDS(here("01Data", "02Derived","01Dataframe", "df_like_utterances.rds"))
+tok_like <- readRDS(here("01Data", "02Derived", "02Spacy Parsed","spacy_like_parsed.rds"))
+```
+
+define the rules for like: POS = verb + exclude "look(s) like“
+
+```{r}
+# 1) Like tokens (token-level)
+like_tok <- tok_like %>%
+  filter(lemma == "like") %>%
+  mutate(doc_id = as.character(doc_id)) %>%
+  select(doc_id, token_id, lemma, pos, dep_rel, head_token_id)
+
+# 2) Head token lookup (for excluding "look like")
+heads <- tok_like %>%
+  mutate(doc_id = as.character(doc_id)) %>%
+  select(doc_id, token_id, head_token = token)
+
+# 3) Preference pattern at doc level (counts ALL like tokens in that utterance as emotion)
+pref_docs <- amb_utt %>%
+  transmute(doc_id = as.character(id), text = gloss_lower) %>%
+  filter(
+    str_detect(text, "\\b(would|could|can|do|did)\\s+you\\s+like\\b") |
+      str_detect(text, "\\b(i\\s*'d|i\\s+would|i\\s+could)\\s+like\\b")
+  ) %>%
+  distinct(doc_id) %>%
+  mutate(pref_rule = TRUE)
+
+# 4) Token-level emotion rule + aggregate counts per doc
+like_counts_by_doc <- like_tok %>%
+  left_join(heads, by = c("doc_id", "head_token_id" = "token_id")) %>%
+  mutate(
+    is_look_like = head_token %in% c("look", "looks", "looked", "looking"),
+    like_token_is_emotion = (pos == "VERB") & !is_look_like
+  ) %>%
+  left_join(pref_docs, by = "doc_id") %>%
+  mutate(
+    pref_rule = if_else(is.na(pref_rule), FALSE, pref_rule),
+    like_token_is_emotion = like_token_is_emotion | pref_rule
+  ) %>%
+  group_by(doc_id) %>%
+  summarise(
+    n_like_tokens = n(),
+    n_like_emotion = sum(like_token_is_emotion),
+    n_like_nonemotion = n_like_tokens - n_like_emotion,
+    like_pos = paste(sort(unique(pos)), collapse = "|"),
+    .groups = "drop"
+  )
+
+saveRDS(
+  like_counts_by_doc,
+  here("01Data", "02Derived","03Annotation", "like_counts_by_doc.rds")
+)
+```
+
+Join back to utterance-level dataframe to check
+
+```{r}
+
+like_counts_by_doc <- readRDS(
+  here("01Data", "02Derived","03Annotation","like_counts_by_doc.rds")
+)
+
+
+amb_utt_like_flagged <- amb_utt %>%
+  mutate(doc_id = as.character(id)) %>%
+  left_join(like_counts_by_doc, by = "doc_id") %>%
+  mutate(
+    n_like_tokens = coalesce(n_like_tokens, 0L),
+    n_like_emotion = coalesce(n_like_emotion, 0L),
+    n_like_nonemotion = coalesce(n_like_nonemotion, 0L)
+  )
+
+head(amb_utt_like_flagged)
+
+```
+
+Count Check
+
+```{r}
+#token level inclusion and exclusion
+like_totals<- amb_utt_like_flagged %>%
+  summarise(
+    # token level
+    total_like_tokens = sum(n_like_tokens, na.rm = TRUE),
+    total_like_emotion_tokens = sum(n_like_emotion, na.rm = TRUE),
+
+    # utterance level
+    utterances_with_like = sum(n_like_tokens > 0, na.rm = TRUE),
+    utterances_with_emotion_like = sum(n_like_emotion > 0, na.rm = TRUE)
+  )
+
+like_totals
+
+#how many utterance with more than two likes 
+amb_utt_like_flagged %>%
+  summarise(
+    utt_with_2plus_likes = sum(n_like_emotion >= 2, na.rm = TRUE),
+    utt_with_3plus_likes = sum(n_like_emotion >= 3, na.rm = TRUE),
+    max_likes_in_utt     = max(n_like_emotion, na.rm = TRUE)
+  )
+
+#check emotion inclusion examples
+
+set.seed(1)
+
+amb_utt_like_flagged %>%
+  filter(n_like_emotion > 0) %>%
+  slice_sample(n = 40) %>%
+  select(id, gloss)
+
+#check non-emotions exclusion
+amb_utt_like_flagged %>%
+  filter(n_like_tokens > 0, n_like_emotion == 0) %>%
+ slice_sample(n = 40) %>%
+  select(id, gloss)
+
+#sanity check
+amb_utt_like_flagged %>%
+  filter(id == 2613441)
+```
+
+how words are used in speech common error: emotion word used as ADJ but not expressing emotion high blue + noun
+
+#### 3.2 Well
+
+rules: well as adj
+
+```{r}
+#prepare dataset
+df_well <- readRDS(here("01Data", "02Derived",  "01Dataframe","df_well_utterances.rds"))
+tok_well <- readRDS(here("01Data", "02Derived", "02Spacy Parsed","spacy_well_parsed.rds"))
+
+
+```
+
+POS tagging and rule applying
+
+```{r}
+# 0) Build a token count per utterance (doc)
+doc_n_tokens <- tok_well %>%
+  mutate(doc_id = as.character(doc_id)) %>%
+  count(doc_id, name = "n_tokens")
+
+# 1) Pull WELL tokens from spacy output
+well_tok <- tok_well %>%
+  mutate(doc_id = as.character(doc_id)) %>%
+  filter(lemma == "well") %>%
+  select(doc_id, token_id, lemma, pos, dep_rel, head_token_id, token)
+
+# 2) Add utterance text (for regex exclusions)
+utt_text <- amb_utt %>%
+  transmute(doc_id = as.character(id), text = gloss_lower)
+
+# 3) Identify which *tokens* of "well" are emotion-uses
+#    (token-level, so we can count >1 per utterance)
+well_emotion_tokens <- well_tok %>%
+  left_join(doc_n_tokens, by = "doc_id") %>%
+  left_join(utt_text, by = "doc_id") %>%
+  filter(
+    pos %in% c("ADJ", "ADV"),            # keep ADJ/ADV
+    n_tokens > 1,                        # exclude single-word utterances
+    !str_detect(text, "^\\s*well\\b"),   # exclude sentence-initial discourse "well ..."
+    !str_detect(text, "\\bas\\s+well\\b")# exclude "as well"
+  ) %>%
+  distinct(doc_id, token_id)
+
+# 4) Count WELL tokens per utterance (all, emotion, non-emotion)
+well_counts_by_doc <- well_tok %>%
+  distinct(doc_id, token_id) %>%  # avoid accidental duplicates
+  left_join(
+    well_emotion_tokens %>% mutate(is_well_emotion = TRUE),
+    by = c("doc_id", "token_id")
+  ) %>%
+  mutate(is_well_emotion = if_else(is.na(is_well_emotion), FALSE, is_well_emotion)) %>%
+  group_by(doc_id) %>%
+  summarise(
+    n_well_tokens     = n(),
+    n_well_emotion    = sum(is_well_emotion),
+    n_well_nonemotion = n_well_tokens - n_well_emotion,
+    .groups = "drop"
+  )
+
+saveRDS(
+  well_counts_by_doc,
+  here("01Data", "02Derived","03Annotation", "well_counts_by_doc.rds")
+)
+```
+
+Join back to utterance-level dataframe to check
+
+```{r}
+
+well_counts_by_doc <- readRDS(
+  here("01Data", "02Derived","03Annotation","well_counts_by_doc.rds")
+)
+
+amb_utt_well_flagged <- amb_utt %>%
+  mutate(doc_id = as.character(id)) %>%
+  left_join(well_counts_by_doc, by = "doc_id") %>%
+  mutate(
+    n_well_tokens     = coalesce(n_well_tokens, 0L),
+    n_well_emotion    = coalesce(n_well_emotion, 0L),
+    n_well_nonemotion = coalesce(n_well_nonemotion, 0L)
+  )
+
+```
+
+Count Check
+
+```{r}
+#token level inclusion and exclusion
+well_totals<- amb_utt_well_flagged %>%
+  summarise(
+    # token level
+    total_well_tokens = sum(n_well_tokens, na.rm = TRUE),
+    total_well_emotion_tokens = sum(n_well_emotion, na.rm = TRUE),
+
+    # utterance level
+    utterances_with_well = sum(n_well_tokens > 0, na.rm = TRUE),
+    utterances_with_emotion_well = sum(n_well_emotion > 0, na.rm = TRUE)
+  )
+
+well_totals
+
+#how many utterance with more than two likes 
+amb_utt_well_flagged %>%
+  summarise(
+    utt_with_2plus_wells = sum(n_well_emotion >= 2, na.rm = TRUE),
+    utt_with_3plus_wells= sum(n_well_emotion >= 3, na.rm = TRUE),
+    max_well_in_utt     = max(n_well_emotion, na.rm = TRUE)
+  )
+
+#check emotion inclusion examples
+
+set.seed(1)
+
+amb_utt_well_flagged %>%
+  filter(n_well_emotion > 0) %>%
+  slice_sample(n = 40) %>%
+  select(id, gloss)
+
+#check non-emotions exclusion
+amb_utt_well_flagged %>%
+  filter(n_well_tokens > 0, n_well_emotion == 0) %>%
+ slice_sample(n = 40) %>%
+  select(id, gloss)
+
+#sanity check
+amb_utt_well_flagged %>%
+  filter(id == 17692225)
+```
+
+#### 3.3. Kind
+
+rule: keep ADJ + exclude "that kind (of thing)"
+
+```{r}
+#prepare dataset
+df_kind <- readRDS(here("01Data", "02Derived","01Dataframe", "df_kind_utterances.rds"))
+tok_kind <- readRDS(here("01Data", "02Derived", "02Spacy Parsed","spacy_kind_parsed.rds"))
+
+```
+
+```{r}
+#1) Pull KIND tokens (token-level) ----
+kind_tok <- tok_kind %>%
+  mutate(doc_id = as.character(doc_id)) %>%
+  filter(lemma == "kind") %>%
+  select(doc_id, token_id, lemma, pos, dep_rel, head_token_id, token)
+
+kind_tok_w_text <- kind_tok %>%
+  left_join(df_kind, by = "doc_id")   # adds text column for exclusions
+
+# ---- 2) Token-level emotion KIND (can count >1 per utterance) ----
+kind_emotion_tokens <- kind_tok_w_text %>%
+  filter(pos == "ADJ") %>%
+  # exclude demonstrative/question "kind" noun uses: "this kind", "what kind", etc.
+  filter(!str_detect(text, "\\b(this|that|these|those|what|which)\\s+kind\\b")) %>%
+  distinct(doc_id, token_id)
+
+# ---- 3) Aggregate counts per utterance ----
+kind_counts_by_doc <- kind_tok_w_text %>%
+  distinct(doc_id, token_id) %>%  # guard against accidental duplicates
+  left_join(
+    kind_emotion_tokens %>% mutate(is_kind_emotion = TRUE),
+    by = c("doc_id", "token_id")
+  ) %>%
+  mutate(is_kind_emotion = if_else(is.na(is_kind_emotion), FALSE, is_kind_emotion)) %>%
+  group_by(doc_id) %>%
+  summarise(
+    n_kind_tokens     = n(),
+    n_kind_emotion    = sum(is_kind_emotion),
+    n_kind_nonemotion = n_kind_tokens - n_kind_emotion,
+    .groups = "drop"
+  )
+
+saveRDS(
+  kind_counts_by_doc,
+  here("01Data", "02Derived","03Annotation", "kind_counts_by_doc.rds")
+)
+```
+
+Join back to utterance-level dataframe to check
+
+```{r}
+
+kind_counts_by_doc <- readRDS(
+  here("01Data", "02Derived","03Annotation","kind_counts_by_doc.rds")
+)
+
+amb_utt_kind_flagged <- amb_utt %>%
+  mutate(doc_id = as.character(id)) %>%
+  left_join(kind_counts_by_doc, by = "doc_id") %>%
+  left_join(kind_pos_by_doc, by = "doc_id") %>%
+  mutate(
+    n_kind_tokens     = coalesce(n_kind_tokens, 0L),
+    n_kind_emotion    = coalesce(n_kind_emotion, 0L),
+    n_kind_nonemotion = coalesce(n_kind_nonemotion, 0L)
+  )
+
+```
+
+```{r}
+
+#token level inclusion and exclusion
+kind_totals <- amb_utt_kind_flagged %>%
+  summarise(
+    # token level
+    total_kind_tokens = sum(n_kind_tokens, na.rm = TRUE),
+    total_kind_emotion_tokens = sum(n_kind_emotion, na.rm = TRUE),
+
+    # utterance level
+    utterances_with_kind = sum(n_kind_tokens > 0, na.rm = TRUE),
+    utterances_with_emotion_kind = sum(n_kind_emotion > 0, na.rm = TRUE)
+  )
+
+kind_totals
+
+#how many utterance with more than two likes 
+amb_utt_kind_flagged %>%
+  summarise(
+    utt_with_2plus_kinds = sum(n_kind_emotion >= 2, na.rm = TRUE),
+    utt_with_3plus_kinds= sum(n_kind_emotion >= 3, na.rm = TRUE),
+    max_kind_in_utt     = max(n_kind_emotion, na.rm = TRUE)
+  )
+
+#check emotion inclusion examples
+
+set.seed(1)
+
+amb_utt_kind_flagged %>%
+  filter(n_kind_emotion > 0) %>%
+  slice_sample(n = 40) %>%
+  select(id, gloss)
+
+#check non-emotions exclusion
+amb_utt_kind_flagged %>%
+  filter(n_kind_tokens > 0, n_kind_emotion == 0) %>%
+ slice_sample(n = 40) %>%
+  select(id, gloss)
+
+#sanity check
+amb_utt_kind_flagged %>%
+  filter(id == 17692225)
+```
+
+####3.4 Fine
+
+```{r}
+df_fine <- readRDS(here("01Data", "02Derived", "01Dataframe","df_fine_utterances.rds"))
+tok_fine <- readRDS(here("01Data", "02Derived","02Spacy Parsed", "spacy_fine_parsed.rds"))
+
+```
+
+```{r}
+tok_fine2 <- tok_fine %>%
+  mutate(
+    doc_id = as.character(doc_id),
+    token_id = as.integer(token_id)
+  )
+
+fine_tok <- tok_fine2 %>%
+  filter(lemma == "fine") %>%
+  select(doc_id, token_id, lemma, pos)
+
+next_tok <- tok_fine2 %>%
+  select(doc_id, token_id, next_pos = pos, next_token = token)
+
+# join each "kind" token to its NEXT token in the same doc
+fine_tok_with_next <- fine_tok %>%
+  left_join(
+    next_tok %>% rename(next_token_id = token_id),
+    by = "doc_id"
+  ) %>%
+  filter(next_token_id == token_id + 1) %>%
+  select(-next_token_id)
+
+# 1) Token-level exclusion: "fine" as ADJ followed by NOUN/PROPN (a fine lady)
+fine_excluded_tokens_adj_noun <- fine_tok_with_next %>%
+  filter(pos == "ADJ", next_pos %in% c("NOUN", "PROPN")) %>%
+  distinct(doc_id, token_id)
+
+# 2) Doc-level exclusion: discourse-initial / standalone "fine"
+fine_exclude_start_standalone_docs <- df_fine %>%
+  filter(
+    # starts with "fine"
+    str_detect(text, "^\\s*fine\\b") &
+    
+    # standalone / discourse use: punctuation or end
+    str_detect(text, "^\\s*fine(\\s*[\\.,—-]|\\s*$)") &
+    
+    # NOT emotional constructions
+    !str_detect(
+      text,
+      "^\\s*(it|that|you)\\s*(is|'s|are|'re)?\\s+fine\\b"
+    )
+  ) %>%
+  distinct(doc_id)
+
+
+# 3) Combine BOTH token-level exclusion sets
+fine_excluded_tokens_all <- bind_rows(
+  fine_excluded_tokens_adj_noun,
+  fine_exclude_start_standalone_docs
+) %>%
+  distinct(doc_id, token_id)
+
+fine_all_counts <- fine_tok %>%
+  count(doc_id, name = "n_fine_tokens")
+
+fine_excluded_counts <- fine_excluded_tokens_all %>%
+  count(doc_id, name = "n_fine_nonemotion")
+
+
+fine_emotion_counts <- fine_all_counts %>%
+  left_join(fine_excluded_counts, by = "doc_id") %>%
+  mutate(
+    n_fine_nonemotion = coalesce(n_fine_nonemotion, 0L),
+    n_fine_emotion = n_fine_tokens - n_fine_nonemotion
+  ) %>%
+  select(doc_id, n_fine_tokens, n_fine_emotion, n_fine_nonemotion)
+
+saveRDS(
+  fine_emotion_counts,
+  here("01Data", "02Derived","03Annotation", "fine_counts_by_doc.rds")
+)
+```
+
+Join back to utterance-level dataframe to check
+
+```{r}
+
+fine_emotion_counts <- readRDS(
+  here("01Data", "02Derived","03Annotation","fine_counts_by_doc.rds")
+)
+
+amb_utt_fine_flagged <- amb_utt %>%
+  mutate(doc_id = as.character(id)) %>%
+  left_join(fine_emotion_counts, by = "doc_id") %>%
+  mutate(
+    n_fine_tokens = coalesce(n_fine_tokens, 0L),
+    n_fine_emotion = coalesce(n_fine_emotion, 0L),
+    n_fine_nonemotion = coalesce(n_fine_nonemotion, 0L)
+  )
+
+```
+
+```{r}
+fine_totals <- amb_utt_fine_flagged %>%
+  summarise(
+    # token level
+    total_fine_tokens = sum(n_fine_tokens, na.rm = TRUE),
+    total_fine_emotion_tokens = sum(n_fine_emotion, na.rm = TRUE),
+
+    # utterance level
+    utterances_with_fine = sum(n_fine_tokens > 0, na.rm = TRUE),
+    utterances_with_emotion_fine = sum(n_fine_emotion > 0, na.rm = TRUE)
+  )
+
+fine_totals
+
+#how many utterance with more than two likes 
+amb_utt_fine_flagged %>%
+  summarise(
+    utt_with_2plus_fines = sum(n_fine_emotion >= 2, na.rm = TRUE),
+    utt_with_3plus_fines= sum(n_fine_emotion >= 3, na.rm = TRUE),
+    max_fine_in_utt     = max(n_fine_emotion, na.rm = TRUE)
+  )
+
+#check emotion inclusion examples
+
+set.seed(1)
+
+amb_utt_fine_flagged %>%
+  filter(n_fine_emotion > 0) %>%
+  slice_sample(n = 40) %>%
+  select(id, gloss)
+
+#check non-emotions exclusion
+amb_utt_fine_flagged %>%
+  filter(n_fine_tokens > 0, n_fine_emotion == 0) %>%
+ slice_sample(n = 40) %>%
+  select(id, gloss)
+
+#sanity check
+amb_utt_fine_flagged %>%
+  filter(id == 318002)
+
+```
+
+####3.5 Blue
+
+```{r}
+df_blue <- readRDS(here("01Data", "02Derived", "01Dataframe","df_blue_utterances.rds"))
+tok_blue <- readRDS(here("01Data", "02Derived","02Spacy Parsed", "spacy_blue_parsed.rds"))
+```
+
+```{r}
+
+# Make sure token_id is numeric
+tok_blue2 <- tok_blue %>%
+  mutate(
+    doc_id = as.character(doc_id),
+    token_id = as.integer(token_id)
+  )
+
+blue_tok <- tok_blue2 %>%
+  filter(lemma == "blue") %>%
+  select(doc_id, token_id, token, lemma, pos, dep_rel)
+
+tok_next <- tok_blue2 %>%
+  select(doc_id, token_id, next_token = token, next_lemma = lemma, next_pos = pos)
+
+blue_tok_with_next <- blue_tok %>%
+  mutate(next_token_id = token_id + 1L) %>%     # <-- compute next id
+  left_join(
+    tok_next,
+    by = c("doc_id" = "doc_id", "next_token_id" = "token_id")
+  ) %>%
+  select(-next_token_id)
+
+utt_lengths <- blue_tok_with_next %>%
+  distinct(doc_id, token_id) %>%
+  group_by(doc_id) %>%
+  summarise(n_tokens = n(), .groups = "drop")
+
+blue_tok_with_next <- blue_tok_with_next %>%
+  left_join(utt_lengths, by = "doc_id")
+blue_excluded_tokens <- blue_tok_with_next %>%
+  filter(
+    # 1) blue as adjective modifying a noun/proper noun
+    (pos == "ADJ" & next_pos %in% c("NOUN", "PROPN")) |
+      
+    # 2) blue used as a noun
+    (pos == "NOUN") 
+  ) %>%
+  distinct(doc_id, token_id)
+
+
+blue_all_counts <- blue_tok %>%
+  count(doc_id, name = "n_blue_tokens")
+
+# excluded (non-emotion) "blue" tokens per utterance
+blue_excluded_counts <- blue_excluded_tokens %>%
+  count(doc_id, name = "n_blue_nonemotion")
+
+# emotion counts = total - excluded
+blue_emotion_counts <- blue_all_counts %>%
+  left_join(blue_excluded_counts, by = "doc_id") %>%
+  mutate(
+    n_blue_nonemotion = coalesce(n_blue_nonemotion, 0L),
+    n_blue_emotion = n_blue_tokens - n_blue_nonemotion
+  ) %>%
+  select(doc_id, n_blue_tokens, n_blue_emotion, n_blue_nonemotion)
+
+saveRDS(
+  blue_emotion_counts,
+  here("01Data", "02Derived","03Annotation", "blue_counts_by_doc.rds")
+)
+```
+
+Join back to utterance-level dataframe to check
+
+```{r}
+
+blue_emotion_counts <- readRDS(
+  here("01Data", "02Derived","03Annotation","blue_counts_by_doc.rds")
+)
+
+
+amb_utt_blue_flagged <- amb_utt %>%
+  mutate(doc_id = as.character(id)) %>%
+  left_join(blue_emotion_counts, by = "doc_id") %>%
+  mutate(
+    n_blue_tokens = coalesce(n_blue_tokens, 0L),
+    n_blue_emotion = coalesce(n_blue_emotion, 0L),
+    n_blue_nonemotion = coalesce(n_blue_nonemotion, 0L)
+  )
+
+```
+
+Count Check
+
+```{r}
+blue_totals <- amb_utt_blue_flagged %>%
+  summarise(
+    # token level
+    total_blue_tokens = sum(n_blue_tokens, na.rm = TRUE),
+    total_blue_emotion_tokens = sum(n_blue_emotion, na.rm = TRUE),
+
+    # utterance level
+    utterances_with_blue = sum(n_blue_tokens > 0, na.rm = TRUE),
+    utterances_with_emotion_blue = sum(n_blue_emotion > 0, na.rm = TRUE)
+  )
+
+blue_totals
+
+
+#check emotion inclusion examples
+
+set.seed(1)
+
+amb_utt_blue_flagged %>%
+  filter(n_blue_emotion > 0) %>%
+  slice_sample(n = 169) %>%
+  select(id, gloss)
+
+#check non-emotions exclusion
+amb_utt_blue_flagged %>%
+  filter(n_blue_tokens > 0, n_blue_emotion == 0) %>%
+ slice_sample(n = 40) %>%
+  select(id, gloss)
+
+#sanity check
+amb_utt_blue_flagged %>%
+  filter(id == 1874322)
+```
+#### 3.12 Merry
+
+```{r} 
+df_merry <- readRDS(here("01Data", "02Derived", "01Dataframe","df_merry_utterances.rds")) 
+tok_merry <- readRDS(here("01Data", "02Derived","02Spacy Parsed", "spacy_merry_parsed.rds"))
+```
+
+Rule: filter Merry-go-around
+
+```{r}
+df_merry2 <- df_merry %>%
+  mutate(
+    doc_id = as.character(doc_id),
+    text_lower = str_to_lower(text)
+  )
+
+merry_exclude_go_family_docs <- df_merry2 %>%
+  filter(
+    str_detect(
+      text_lower,
+      "\\bmerry\\s*[-–—]?\\s*go\\b"  # catches: merry go, merry-go
+    ) |
+    str_detect(
+      text_lower,
+      "\\bmerry\\s*[-–—]?\\s*go\\s*[-–—]?\\s*(round|ride)\\b" # merry go round/ride, merry-go-round
+    )
+  ) %>%
+  distinct(doc_id)
+
+# merry tokens (the ones we are deciding whether to exclude)
+merry_tok <- tok_merry2 %>%
+  filter(lemma_lower == "merry") %>%
+  select(doc_id, token_id, token, lemma, pos)
+
+merry_excluded_go_family_tokens <- merry_tok %>%
+  semi_join(merry_exclude_go_family_docs, by = "doc_id") %>%
+  distinct(doc_id, token_id)
+
+# lookup tables for next token (+1) and next2 (+2)
+
+# PROPN exclusion but keep merry christmas
+# (this one is easiest also using text)
+merry_exclude_propn_not_christmas_docs <- df_merry2 %>%
+  filter(
+    str_detect(text_lower, "\\bmerry\\b"),
+    !str_detect(text_lower, "\\bmerry\\s+christmas\\b"),
+    !str_detect(text_lower, "\\bmerry\\s*[-–—]?\\s*christmas\\b") # just in case
+  ) %>%
+  distinct(doc_id)
+
+merry_excluded_propn_tokens <- merry_tok %>%
+  filter(pos == "PROPN") %>%
+  semi_join(merry_exclude_propn_not_christmas_docs, by = "doc_id") %>%
+  distinct(doc_id, token_id)
+
+merry_excluded_tokens_all <- bind_rows(
+  merry_excluded_propn_tokens,
+  merry_excluded_go_family_tokens
+) %>%
+  distinct(doc_id, token_id)
+
+# total merry tokens per utterance
+merry_all_counts <- merry_tok %>%
+  count(doc_id, name = "n_merry_tokens")
+
+# excluded (non-emotion) tokens per utterance
+merry_excluded_counts <- merry_excluded_tokens_all %>%
+  count(doc_id, name = "n_merry_nonemotion")
+
+# compute emotion counts
+merry_emotion_counts <- merry_all_counts %>%
+  left_join(merry_excluded_counts, by = "doc_id") %>%
+  mutate(
+    n_merry_nonemotion = coalesce(n_merry_nonemotion, 0L),
+    n_merry_emotion = n_merry_tokens - n_merry_nonemotion
+  ) %>%
+  select(doc_id, n_merry_tokens, n_merry_emotion, n_merry_nonemotion)
+
+saveRDS(
+ merry_emotion_counts,
+  here("01Data", "02Derived","03Annotation", "merry_counts_by_doc.rds")
+)
+```
+
+Join back to utterance-level dataframe to check
+
+```{r}
+
+merry_emotion_counts <- readRDS(
+  here("01Data", "02Derived","03Annotation","merry_counts_by_doc.rds")
+)
+
+amb_utt_merry_flagged <- amb_utt %>%
+  mutate(doc_id = as.character(id)) %>%
+  left_join(merry_emotion_counts, by = "doc_id") %>%
+  mutate(
+    n_merry_tokens = coalesce(n_merry_tokens, 0L),
+    n_merry_emotion = coalesce(n_merry_emotion, 0L),
+    n_merry_nonemotion = coalesce(n_merry_nonemotion, 0L)
+  )
+merry_go_round_n_by_doc <- tok_merry2 %>%
+  mutate(
+    doc_id = as.character(doc_id),
+    token_lower = str_to_lower(token)
+  ) %>%
+  filter(token_lower %in% c("merry+go+round", "merry+go+rounds")) %>%
+  count(doc_id, name = "n_mgr")   # helper: how many "merry-go-round" tokens in that utterance
+merry_go_round_n_by_doc
+
+# 2) Join + shift counts: emotion -> nonemotion for those tokens
+amb_utt_merry_flagged <- amb_utt_merry_flagged %>%
+  mutate(doc_id = as.character(id)) %>%
+  left_join(merry_go_round_n_by_doc, by = "doc_id") %>%
+  mutate(
+    n_mgr = coalesce(n_mgr, 0L),
+
+    # shift: these should NOT be emotion
+    n_merry_nonemotion = n_merry_nonemotion + n_mgr,
+    n_merry_emotion    = pmax(n_merry_emotion - n_mgr, 0L),
+     n_merry_tokens = n_merry_emotion + n_merry_nonemotion
+
+
+    # n_merry_tokens stays the same (we are reclassifying, not removing)
+  ) %>%
+  select(-n_mgr)
+
+head(amb_utt_merry_flagged)
+```
+
+```{r}
+
+#token level inclusion and exclusion
+merry_totals <- amb_utt_merry_flagged %>%
+  summarise(
+    # token level
+    total_merry_tokens = sum(n_merry_tokens, na.rm = TRUE),
+    total_merry_emotion_tokens = sum(n_merry_emotion, na.rm = TRUE),
+
+    # utterance level
+    utterances_with_merry = sum(n_merry_tokens > 0, na.rm = TRUE),
+    utterances_with_emotion_merry = sum(n_merry_emotion > 0, na.rm = TRUE)
+  )
+
+merry_totals
+
+#how many utterance with more than two likes 
+amb_utt_merry_flagged %>%
+  summarise(
+    utt_with_2plus_merrys = sum(n_merry_tokens >= 2, na.rm = TRUE),
+    utt_with_3plus_merrys= sum(n_merry_tokens >= 3, na.rm = TRUE),
+    max_merry_in_utt     = max(n_merry_tokens, na.rm = TRUE)
+  )
+
+#check emotion inclusion examples
+
+set.seed(1)
+
+amb_utt_merry_flagged %>%
+  filter(n_merry_emotion > 0) %>%
+  slice_sample(n = 40) %>%
+  select(id, gloss)
+
+#check non-emotions exclusion
+amb_utt_merry_flagged %>%
+  filter(n_merry_tokens > 0, n_merry_emotion == 0) %>%
+ slice_sample(n = 40) %>%
+  select(id, gloss)
+
+#sanity check
+amb_utt_merry_flagged %>%
+  filter(id == 17486037)
+
+```
+
+#### 3.13 Moved
+
+```{r}
+df_moved <- readRDS(here("01Data", "02Derived", "01Dataframe","df_moved_utterances.rds"))
+tok_moved <- readRDS(here("01Data", "02Derived","02Spacy Parsed", "spacy_moved_parsed.rds"))
+```
+
+```{r}
+tok_moved2 <- tok_moved %>%
+  mutate(
+    doc_id = as.character(doc_id),
+    token_id = as.integer(token_id),
+    token_lower = str_to_lower(token),
+    lemma_lower = str_to_lower(lemma)
+  )
+moved_tok <- tok_moved2 %>%
+  filter(token_lower == "moved") %>%
+  select(doc_id, token_id, token, lemma, pos)
+
+# total moved tokens per doc
+moved_all_counts <- moved_tok %>%
+  count(doc_id, name = "n_moved_tokens")
+
+# excluded = moved used as a VERB (your rule)
+moved_excluded_tokens <- moved_tok %>%
+  filter(pos == "VERB") %>%
+  distinct(doc_id, token_id)
+
+moved_excluded_counts <- moved_excluded_tokens %>%
+  count(doc_id, name = "n_moved_nonemotion")
+
+# derive emotion counts
+moved_emotion_counts <- moved_all_counts %>%
+  left_join(moved_excluded_counts, by = "doc_id") %>%
+  mutate(
+    n_moved_nonemotion = coalesce(n_moved_nonemotion, 0L),
+    n_moved_emotion = n_moved_tokens - n_moved_nonemotion
+  ) %>%
+  select(doc_id, n_moved_tokens, n_moved_emotion, n_moved_nonemotion)
+
+# save
+saveRDS(
+  moved_emotion_counts,
+  here("01Data", "02Derived","03Annotation", "moved_counts_by_doc.rds")
+)
+
+```
+
+```{r}
+
+moved_emotion_counts <- readRDS(
+  here("01Data", "02Derived","03Annotation","moved_counts_by_doc.rds")
+)
+
+amb_utt_moved_flagged <- amb_utt %>%
+  mutate(doc_id = as.character(id)) %>%
+  left_join(moved_emotion_counts, by = "doc_id") %>%
+  mutate(
+    n_moved_tokens = coalesce(n_moved_tokens, 0L),
+    n_moved_emotion = coalesce(n_moved_emotion, 0L),
+    n_moved_nonemotion = coalesce(n_moved_nonemotion, 0L)
+  )
+
+head(amb_utt_moved_flagged)
+```
+
+```{r}
+
+#token level inclusion and exclusion
+moved_totals <- amb_utt_moved_flagged %>%
+  summarise(
+    # token level
+    total_moved_tokens = sum(n_moved_tokens, na.rm = TRUE),
+    total_moved_emotion_tokens = sum(n_moved_emotion, na.rm = TRUE),
+
+    # utterance level
+    utterances_with_moved = sum(n_moved_tokens > 0, na.rm = TRUE),
+    utterances_with_emotion_moved = sum(n_moved_emotion > 0, na.rm = TRUE)
+  )
+
+moved_totals
+
+#check emotion inclusion examples
+
+set.seed(1)
+
+amb_utt_moved_flagged %>%
+  filter(n_moved_emotion > 0) %>%
+  slice_sample(n = 40) %>%
+  select(id, gloss)
+
+#check non-emotions exclusion
+amb_utt_moved_flagged %>%
+  filter(n_moved_tokens > 0, n_moved_emotion == 0) %>%
+ slice_sample(n = 40) %>%
+  select(id, gloss)
+
+#sanity check
+amb_utt_moved_flagged %>%
+  filter(id == 17486037)
+
+```
+
+#### 3.7 Certain
+```{r}
+df_certain <- readRDS(here("01Data", "02Derived", "01Dataframe","df_certain_utterances.rds"))
+tok_certain <- readRDS(here("01Data", "02Derived","02Spacy Parsed", "spacy_certain_parsed.rds"))
+```
+
+```{r}
+tok_certain2 <- tok_certain %>%
+  mutate(
+    doc_id = as.character(doc_id),
+    token_id = as.integer(token_id),
+    token_lower = str_to_lower(token),
+    lemma_lower = str_to_lower(lemma)
+  )
+
+certain_tok <- tok_certain2 %>%
+  filter(lemma_lower == "certain") %>%
+  select(doc_id, token_id, token, lemma, pos)
+# total moved tokens per doc
+certain_all_counts <- certain_tok %>%
+  count(doc_id, name = "n_certain_tokens")
+
+
+tok_next <- tok_certain2 %>%
+  select(
+    doc_id,
+    token_id,
+    next_token = token,
+    next_lemma = lemma,
+    next_pos = pos
+  )
+
+certain_tok_with_next <- certain_tok %>%
+  mutate(next_token_id = token_id + 1L) %>%
+  left_join(
+    tok_next,
+    by = c("doc_id", "next_token_id" = "token_id")
+  ) %>%
+  select(-next_token_id)
+
+certain_excluded_det_tokens <- certain_tok_with_next %>%
+  filter(
+    pos == "ADJ",
+    next_pos %in% c("NOUN", "PROPN")
+  ) %>%
+  distinct(doc_id, token_id)
+
+certain_excluded_counts <- certain_excluded_det_tokens %>%
+  count(doc_id, name = "n_certain_nonemotion")
+
+# derive emotion counts
+certain_emotion_counts <- certain_all_counts %>%
+  left_join(certain_excluded_counts, by = "doc_id") %>%
+  mutate(
+    n_certain_nonemotion = coalesce(n_certain_nonemotion, 0L),
+    n_certain_emotion = n_certain_tokens - n_certain_nonemotion
+  ) %>%
+  select(doc_id, n_certain_tokens, n_certain_emotion, n_certain_nonemotion)
+
+# save
+saveRDS(
+  certain_emotion_counts,
+  here("01Data", "02Derived","03Annotation", "certain_counts_by_doc.rds")
+)
+```
+
+```{r}
+certain_emotion_counts <- readRDS(
+  here("01Data", "02Derived","03Annotation","certain_counts_by_doc.rds")
+)
+
+amb_utt_certain_flagged <- amb_utt %>%
+  mutate(doc_id = as.character(id)) %>%
+  left_join(certain_emotion_counts, by = "doc_id") %>%
+  mutate(
+    n_certain_tokens = coalesce(n_certain_tokens, 0L),
+    n_certain_emotion = coalesce(n_certain_emotion, 0L),
+    n_certain_nonemotion = coalesce(n_certain_nonemotion, 0L)
+  )
+
+head(amb_utt_certain_flagged)
+```
+
+```{r}
+
+#token level inclusion and exclusion
+certain_totals <- amb_utt_certain_flagged %>%
+  summarise(
+    # token level
+    total_certain_tokens = sum(n_certain_tokens, na.rm = TRUE),
+    total_certain_emotion_tokens = sum(n_certain_emotion, na.rm = TRUE),
+
+    # utterance level
+    utterances_with_certain = sum(n_certain_tokens > 0, na.rm = TRUE),
+    utterances_with_emotion_certain= sum(n_certain_emotion > 0, na.rm = TRUE)
+  )
+
+certain_totals
+
+#check emotion inclusion examples
+
+set.seed(1)
+
+amb_utt_certain_flagged %>%
+  filter(n_certain_emotion > 0) %>%
+  slice_sample(n = 40) %>%
+  select(id, gloss)
+
+#check non-emotions exclusion
+amb_utt_certain_flagged %>%
+  filter(n_certain_tokens > 0, n_certain_emotion == 0) %>%
+ slice_sample(n = 40) %>%
+  select(id, gloss)
+
+#sanity check
+amb_utt_certain_flagged %>%
+  filter(id == 17486037)
+
+```
+
+
+####3.5 High
+
+```{r}
+df_high <- readRDS(here("01Data", "02Derived", "01Dataframe","df_high_utterances.rds"))
+tok_high <- readRDS(here("01Data", "02Derived", "02Spacy Parsed","spacy_high_parsed.rds"))
+```
+
+Rule: exclude adj+noun
+
+```{r}
+
+
+# Make sure token_id is numeric
+tok_high2 <- tok_high %>%
+  mutate(
+    doc_id = as.character(doc_id),
+    token_id = as.integer(token_id)
+  )
+
+high_tok <- tok_high2 %>%
+  filter(lemma == "high") %>%
+  select(doc_id, token_id, token, lemma, pos, dep_rel)
+
+tok_next <- tok_high2 %>%
+  select(doc_id, token_id, next_token = token, next_lemma = lemma, next_pos = pos)
+
+high_tok_with_next <- high_tok %>%
+  mutate(next_token_id = token_id + 1L) %>%     # <-- compute next id
+  left_join(
+    tok_next,
+    by = c("doc_id" = "doc_id", "next_token_id" = "token_id")
+  ) %>%
+  select(-next_token_id)
+
+
+high_excluded_adj_noun <- high_tok_with_next %>%
+  filter(pos == "ADJ", next_pos %in% c("NOUN", "PROPN")) %>%
+  distinct(doc_id, token_id)
+
+high_excluded_high_on <- high_tok_with_next %>%
+  filter(pos == "ADJ", str_to_lower(next_token) == "on") %>%
+  distinct(doc_id, token_id)
+
+high_exclude_start_standalone_docs <- df_high %>%
+  filter(
+    str_detect(text, "^\\s*high(\\s*[\\.,—\\-]|\\s*$)")
+  ) %>%
+  distinct(doc_id)
+high_excluded_start_standalone <- high_exclude_start_standalone_docs %>%
+  left_join(high_tok_with_next %>% distinct(doc_id, token_id), by = "doc_id")
+
+high_excluded_tokens_all <- bind_rows(
+  high_excluded_adj_noun,
+  high_excluded_high_on,
+  high_excluded_start_standalone
+  # , high_excluded_high_five
+) %>%
+  distinct(doc_id, token_id)
+
+# total "high" tokens per utterance
+high_all_counts <- high_tok %>%
+  count(doc_id, name = "n_high_tokens")
+
+# excluded (non-emotion) "high" tokens per utterance
+high_excluded_counts <- high_excluded_tokens_all %>%
+  count(doc_id, name = "n_high_nonemotion")
+
+# emotion counts = total - excluded
+high_emotion_counts <- high_all_counts %>%
+  left_join(high_excluded_counts, by = "doc_id") %>%
+  mutate(
+    n_high_nonemotion = coalesce(n_high_nonemotion, 0L),
+    n_high_emotion = n_high_tokens - n_high_nonemotion
+  ) %>%
+  select(doc_id, n_high_tokens, n_high_emotion, n_high_nonemotion)
+
+saveRDS(
+  high_emotion_counts,
+  here("01Data", "02Derived","03Annotation", "high_counts_by_doc.rds")
+)
+```
+
+Join back to utterance-level dataframe to check
+
+```{r}
+
+high_emotion_counts <- readRDS(
+  here("01Data", "02Derived","03Annotation","high_counts_by_doc.rds")
+)
+
+amb_utt_high_flagged <- amb_utt %>%
+  mutate(doc_id = as.character(id)) %>%
+  left_join(high_emotion_counts, by = "doc_id") %>%
+  mutate(
+    n_high_tokens = coalesce(n_high_tokens, 0L),
+    n_high_emotion = coalesce(n_high_emotion, 0L),
+    n_high_nonemotion = coalesce(n_high_nonemotion, 0L)
+  )
+
+```
+
+```{r}
+high_totals <- amb_utt_high_flagged %>%
+  summarise(
+    # token level
+    total_high_tokens = sum(n_high_tokens, na.rm = TRUE),
+    total_high_emotion_tokens = sum(n_high_emotion, na.rm = TRUE),
+
+    # utterance level
+    utterances_with_high = sum(n_high_tokens > 0, na.rm = TRUE),
+    utterances_with_emotion_high = sum(n_high_emotion > 0, na.rm = TRUE)
+  )
+
+high_totals
+
+
+#check emotion inclusion examples
+
+set.seed(1)
+
+amb_utt_high_flagged %>%
+  filter(n_high_emotion > 0) %>%
+  slice_sample(n = 200) %>%
+  select(id, gloss)
+
+#check non-emotions exclusion
+amb_utt_high_flagged %>%
+  filter(n_high_tokens > 0, n_high_emotion == 0) %>%
+ slice_sample(n = 40) %>%
+  select(id, gloss)
+
+#sanity check
+amb_utt_high_flagged %>%
+  filter(id == 318002)
+```
+
+####3.10 Touched
+
+```{r}
+df_touched <- readRDS(here("01Data", "02Derived", "01Dataframe","df_touched_utterances.rds"))
+tok_touched <- readRDS(here("01Data", "02Derived", "02Spacy Parsed","spacy_touched_parsed.rds"))
+```
+
+Rule: exclude adj+noun
+
+```{r}
+tok_touched2 <- tok_touched %>%
+  mutate(
+    doc_id = as.character(doc_id),
+    token_id = as.integer(token_id),
+    token_lower = str_to_lower(token),
+    lemma_lower = str_to_lower(lemma)
+  )
+touched_tok <- tok_touched2 %>%
+  filter(token_lower == "touched") %>%
+  select(doc_id, token_id, token, lemma, pos)
+
+# total touched tokens per doc
+touched_all_counts <- touched_tok %>%
+  count(doc_id, name = "n_touched_tokens")
+
+# excluded = touched used as a VERB (your rule)
+touched_excluded_tokens <- touched_tok %>%
+  filter(pos == "VERB") %>%
+  distinct(doc_id, token_id)
+
+touched_excluded_counts <- touched_excluded_tokens %>%
+  count(doc_id, name = "n_touched_nonemotion")
+
+# derive emotion counts
+touched_emotion_counts <- touched_all_counts %>%
+  left_join(touched_excluded_counts, by = "doc_id") %>%
+  mutate(
+    n_touched_nonemotion = coalesce(n_touched_nonemotion, 0L),
+    n_touched_emotion = n_touched_tokens - n_touched_nonemotion
+  ) %>%
+  select(doc_id, n_touched_tokens, n_touched_emotion, n_touched_nonemotion)
+
+# save
+saveRDS(
+  touched_emotion_counts,
+  here("01Data", "02Derived","03Annotation", "touched_counts_by_doc.rds")
+)
+
+```
+
+Join back to utterance-level dataframe to check
+
+```{r}
+
+touched_emotion_counts <- readRDS(
+  here("01Data", "02Derived","03Annotation","touched_counts_by_doc.rds")
+)
+
+amb_utt_touched_flagged <- amb_utt %>%
+  mutate(doc_id = as.character(id)) %>%
+  left_join(touched_emotion_counts, by = "doc_id") %>%
+  mutate(
+    n_touched_tokens = coalesce(n_touched_tokens, 0L),
+    n_touched_emotion = coalesce(n_touched_emotion, 0L),
+    n_touched_nonemotion = coalesce(n_touched_nonemotion, 0L)
+  )
+
+```
+
+```{r}
+touched_totals <- amb_utt_touched_flagged %>%
+  summarise(
+    # token level
+    total_touched_tokens = sum(n_touched_tokens, na.rm = TRUE),
+    total_touched_emotion_tokens = sum(n_touched_emotion, na.rm = TRUE),
+
+    # utterance level
+    utterances_with_touched = sum(n_touched_tokens > 0, na.rm = TRUE),
+    utterances_with_emotion_touched = sum(n_touched_emotion > 0, na.rm = TRUE)
+  )
+
+touched_totals
+
+
+#check emotion inclusion examples
+
+set.seed(1)
+
+amb_utt_touched_flagged %>%
+  filter(n_touched_emotion > 0) %>%
+  slice_sample(n = 40) %>%
+  select(id, gloss)
+
+#check non-emotions exclusion
+amb_utt_touched_flagged %>%
+  filter(n_touched_tokens > 0, n_touched_emotion == 0) %>%
+ slice_sample(n = 40) %>%
+  select(id, gloss)
+
+#sanity check
+amb_utt_touched_flagged %>%
+  filter(id == 318002)
+
+touched_tok %>% 
+  filter(doc_id == 387228)
+```
+####3.11 Patient
+
+```{r}
+df_patient <- readRDS(here("01Data", "02Derived", "01Dataframe","df_patient_utterances.rds"))
+tok_patient <- readRDS(here("01Data", "02Derived", "02Spacy Parsed","spacy_patient_parsed.rds"))
+```
+
+Rule: exclude adj+noun
+
+```{r}
+tok_patient2 <- tok_patient %>%
+  mutate(
+    doc_id = as.character(doc_id),
+    token_id = as.integer(token_id),
+    token_lower = str_to_lower(token),
+    lemma_lower = str_to_lower(lemma)
+  )
+patient_tok <- tok_patient2 %>%
+  filter(token_lower == "patient") %>%
+  select(doc_id, token_id, token, lemma, pos)
+
+# total patient tokens per doc
+patient_all_counts <- patient_tok %>%
+  count(doc_id, name = "n_patient_tokens")
+
+# excluded = touched used as a NOUN (your rule)
+patient_excluded_tokens <- patient_tok %>%
+  filter(pos == "NOUN") %>%
+  distinct(doc_id, token_id)
+
+patient_excluded_counts <- patient_excluded_tokens %>%
+  count(doc_id, name = "n_patient_nonemotion")
+
+# derive emotion counts
+patient_emotion_counts <- patient_all_counts %>%
+  left_join(patient_excluded_counts, by = "doc_id") %>%
+  mutate(
+    n_patient_nonemotion = coalesce(n_patient_nonemotion, 0L),
+    n_patient_emotion = n_patient_tokens - n_patient_nonemotion
+  ) %>%
+  select(doc_id, n_patient_tokens, n_patient_emotion, n_patient_nonemotion)
+
+# save
+saveRDS(
+patient_emotion_counts,
+  here("01Data", "02Derived","03Annotation", "patient_counts_by_doc.rds")
+)
+
+```
+
+Join back to utterance-level dataframe to check
+
+```{r}
+
+patient_emotion_counts <- readRDS(
+  here("01Data", "02Derived","03Annotation","patient_counts_by_doc.rds")
+)
+
+amb_utt_patient_flagged <- amb_utt %>%
+  mutate(doc_id = as.character(id)) %>%
+  left_join(patient_emotion_counts, by = "doc_id") %>%
+  mutate(
+    n_patient_tokens = coalesce(n_patient_tokens, 0L),
+    n_patient_emotion = coalesce(n_patient_emotion, 0L),
+    n_patient_nonemotion = coalesce(n_patient_nonemotion, 0L)
+  )
+
+```
+
+```{r}
+patient_totals <- amb_utt_patient_flagged %>%
+  summarise(
+    # token level
+    total_patient_tokens = sum(n_patient_tokens, na.rm = TRUE),
+    total_patient_emotion_tokens = sum(n_patient_emotion, na.rm = TRUE),
+
+    # utterance level
+    utterances_with_patient = sum(n_patient_tokens > 0, na.rm = TRUE),
+    utterances_with_emotion_patient = sum(n_patient_emotion > 0, na.rm = TRUE)
+  )
+
+patient_totals
+
+
+#check emotion inclusion examples
+
+set.seed(1)
+
+amb_utt_patient_flagged %>%
+  filter(n_patient_emotion > 0) %>%
+  slice_sample(n = 40) %>%
+  select(id, gloss)
+
+#check non-emotions exclusion
+amb_utt_patient_flagged %>%
+  filter(n_patient_tokens > 0, n_patient_emotion == 0) %>%
+ slice_sample(n = 40) %>%
+  select(id, gloss)
+
+#sanity check
+amb_utt_patient_flagged %>%
+  filter(id == 318002)
+```
+
+### Step 4:S-BERT Sentence Embedded Tagging
+
+```{r}
+library(reticulate)
+amb_utt <- readRDS(here("01Data", "02Derived", "amb_utterances.rds"))
+
+st <- import("sentence_transformers")
+
+# load the model (this defines `model`)
+model <- st$SentenceTransformer("all-MiniLM-L6-v2")
+```
+#### 4.1 High
+
+prepare High SBERT candidate set
+```{r}
+
+
+high_counts_by_doc <- readRDS(
+  here("01Data", "02Derived","03Annotation", "high_counts_by_doc.rds")
+)
+amb_high_sbert <- amb_utt %>%
+  mutate(doc_id = as.character(id)) %>%
+  left_join(high_counts_by_doc, by = "doc_id") %>%
+  filter(!is.na(n_high_emotion) & n_high_emotion > 0) %>% 
+  select(
+    doc_id,
+    text = gloss_lower,
+    n_high_emotion,
+    n_high_tokens
+  )
+
+nrow(amb_high_sbert)                 # how many utterances go to SBERT
+summary(amb_high_sbert$n_high_emotion)
+
+# inspect a few
+amb_high_sbert %>%
+  head(10)
+
+
+```
+
+```{r}
+# --- 0) Data ---
+text_col <- "text"
+stopifnot(text_col %in% names(amb_high_sbert))
+
+amb_high_sbert2 <- amb_high_sbert %>%
+  mutate(.text = str_to_lower(.data[[text_col]])) %>%
+  filter(str_detect(.text, "\\bhigh\\b"))
+
+stopifnot(nrow(amb_high_sbert2) > 0)
+
+# --- 1) Sense prototypes (high:excitement or flying high) 
+
+emotion_ref_high <- paste(
+  "feeling high",
+"excited thrilled euphoric elated",
+  "on a high",
+  "buzzing energized",
+  "intoxicated stoned drunk",
+  "in a great mood"
+)
+
+other_ref_high <- paste(
+  "high up",
+  "tall height altitude",
+  "far above the ground",
+  "flying high",
+  "high ceiling",
+  "high mountain",
+  "high number level value price",
+  "high school grade"
+)
+
+all_texts <- c(amb_high_sbert2$.text, emotion_ref_high, other_ref_high)
+
+# --- 2) Embeddings (sentence-transformers) ---
+# assumes you've already created `model` as you just did:
+# model <- st$SentenceTransformer("all-MiniLM-L6-v2")
+
+X <- py_to_r(model$encode(all_texts))
+X <- as.matrix(X)
+storage.mode(X) <- "double"
+
+stopifnot(nrow(X) == length(all_texts))
+stopifnot(ncol(X) > 10)
+stopifnot(all(is.finite(X)))
+
+# --- 3) Cosine similarity ---
+cos_sim_safe <- function(a, b) {
+  denom <- sqrt(sum(a*a)) * sqrt(sum(b*b))
+  if (!is.finite(denom) || denom == 0) return(NA_real_)
+  sum(a*b) / denom
+}
+
+n_u <- nrow(amb_high_sbert2)
+i_emotion <- n_u + 1
+i_other   <- n_u + 2
+
+sim_emotion <- vapply(1:n_u, \(i) cos_sim_safe(X[i, ], X[i_emotion, ]), numeric(1))
+sim_other   <- vapply(1:n_u, \(i) cos_sim_safe(X[i, ], X[i_other, ]),   numeric(1))
+
+# --- 4) Results ---
+df_high_scored <- amb_high_sbert2 %>%
+  mutate(
+    sim_to_high_emotion = sim_emotion,
+    sim_to_high_other  = sim_other,
+   high_sense_margin   = sim_emotion - sim_other,
+   high_sense_pred     = ifelse(high_sense_margin > 0, "emotion_like", "other_like")
+  )
+
+# Quick summary
+mean(df_high_scored$high_sense_pred == "emotion_like", na.rm = TRUE)
+summary(df_high_scored$high_sense_margin)
+
+# Inspect extremes
+df_high_scored %>% arrange(desc(high_sense_margin)) %>% select(.text, high_sense_margin) %>% head(15) #high closer to emotion
+df_high_scored %>% arrange(high_sense_margin) %>% select(.text, high_sense_margin) %>% head(15)
+
+saveRDS(
+  df_high_scored,
+  here("01Data", "02Derived","04S-BERT Scored", "df_high_scored.rds")
+)
+```
+1. get N-> if > 100, do not manually inspect move on to 2. SBERT -> if mean <0, manually inspect everything >0 -> decide to abandon word or not. 
+
+#### 4.2 Blue
+Prepare Blue candidate dataset
+```{r}
+blue_counts_by_doc <- readRDS(
+  here("01Data", "02Derived","03Annotation", "blue_counts_by_doc.rds")
+)
+amb_blue_sbert <- amb_utt %>%
+  mutate(doc_id = as.character(id)) %>%
+  left_join(blue_counts_by_doc, by = "doc_id") %>%
+  filter(!is.na(n_blue_emotion) & n_blue_emotion > 0) %>% 
+  select(
+    doc_id,
+    text = gloss_lower,
+    n_blue_emotion,
+    n_blue_tokens
+  )
+
+nrow(amb_blue_sbert)                 # how many utterances go to SBERT
+summary(amb_blue_sbert$n_blue_emotion)
+
+# inspect a few
+amb_blue_sbert %>%
+  head(10)
+```
+
+```{r}
+
+# --- 0) Data ---
+text_col <- "text"
+stopifnot(text_col %in% names(amb_blue_sbert))
+
+df_blue2 <- amb_blue_sbert %>%
+  mutate(.text = str_to_lower(.data[[text_col]])) %>%
+  filter(str_detect(.text, "\\bblue\\b"))
+
+stopifnot(nrow(df_blue2) > 0)
+
+# --- 1) Sense prototypes (blue: sad vs color) ---
+emotion_ref_blue <- "feeling blue sad unhappy down depressed lonely upset mood"
+color_ref_blue   <- "blue color paint sky shirt eyes crayon visual colour pigment"
+
+all_texts <- c(df_blue2$.text, emotion_ref_blue, color_ref_blue)
+
+# --- 2) Embeddings (sentence-transformers) ---
+# assumes you've already created `model` as you just did:
+# model <- st$SentenceTransformer("all-MiniLM-L6-v2")
+
+X <- py_to_r(model$encode(all_texts))
+X <- as.matrix(X)
+storage.mode(X) <- "double"
+
+stopifnot(nrow(X) == length(all_texts))
+stopifnot(ncol(X) > 10)
+stopifnot(all(is.finite(X)))
+
+# --- 3) Cosine similarity ---
+cos_sim_safe <- function(a, b) {
+  denom <- sqrt(sum(a*a)) * sqrt(sum(b*b))
+  if (!is.finite(denom) || denom == 0) return(NA_real_)
+  sum(a*b) / denom
+}
+
+n_u <- nrow(df_blue2)
+i_emotion <- n_u + 1
+i_color   <- n_u + 2
+
+sim_emotion <- vapply(1:n_u, \(i) cos_sim_safe(X[i, ], X[i_emotion, ]), numeric(1))
+sim_color   <- vapply(1:n_u, \(i) cos_sim_safe(X[i, ], X[i_color, ]),   numeric(1))
+
+# --- 4) Results ---
+df_blue_scored <- df_blue2 %>%
+  mutate(
+    sim_to_blue_emotion = sim_emotion,
+    sim_to_blue_color   = sim_color,
+    blue_sense_margin   = sim_emotion - sim_color,
+    blue_sense_pred     = ifelse(blue_sense_margin > 0, "emotion_like", "color_like")
+  )
+
+# Quick summary
+mean(df_blue_scored$blue_sense_pred == "emotion_like", na.rm = TRUE)
+summary(df_blue_scored$blue_sense_margin)
+
+# Inspect extremes
+df_blue_scored %>% arrange(desc(blue_sense_margin)) %>% select(doc_id, .text, blue_sense_margin) %>% head(15) #blue closer to emotion
+df_blue_scored %>% arrange(blue_sense_margin) %>% select(.text, blue_sense_margin) %>% head(15)
+
+saveRDS(
+  df_blue_scored,
+  here("01Data", "02Derived","04S-BERT Scored", "df_blue_scored.rds")
+)
+```
+
+Maunal Inspectation
+```{r}
+df_blue_emotion_candidates <- df_blue_scored %>%
+  filter(blue_sense_margin > 0) %>% 
+ arrange(desc(blue_sense_margin)) %>% 
+  select(
+    doc_id,
+    text = .text,          # or your original text column
+    blue_sense_margin
+  )
+
+write.csv(
+  df_blue_emotion_candidates,
+  here("01Data", "02Derived", "05Manual Inspectation", "Blue_Manual Inspectation.csv"),
+  row.names = FALSE
+)
+
+nrow(df_blue_emotion_candidates)
+```
+
+#### 3.7 *Lost
+
+```{r}
+df_lost <- readRDS(here("01Data", "02Derived", "01Dataframe","df_lost_utterances.rds"))
+
+```
+
+```{r}
+
+# --- 0) Data ---
+text_col <- "text"
+stopifnot(text_col %in% names(df_lost))
+
+df_lost2 <- df_lost %>%
+  mutate(.text = str_to_lower(.data[[text_col]])) %>%
+  filter(str_detect(.text, "\\blost\\b"))
+
+stopifnot(nrow(df_lost2) > 0)
+
+# --- 1) Sense prototypes (blue: sad vs color) ---
+emotion_ref_lost <- paste(
+  "feeling lost",
+  "confused unsure uncertain",
+  "don't know what to do",
+  "worried anxious overwhelmed",
+  "helpless",
+  "emotionally lost"
+)
+
+other_ref_lost <- paste(
+  "lost it",
+  "lost my toy keys shoes",
+  "can't find it",
+  "misplaced",
+  "lost in the store",
+  "not knowing the way",
+  "got lost on the road",
+  "lost game points"
+)
+
+all_texts <- c(df_lost2$.text, emotion_ref_lost, other_ref_lost)
+
+# --- 2) Embeddings (sentence-transformers) ---
+# assumes you've already created `model` as you just did:
+# model <- st$SentenceTransformer("all-MiniLM-L6-v2")
+
+X <- py_to_r(model$encode(all_texts))
+X <- as.matrix(X)
+storage.mode(X) <- "double"
+
+stopifnot(nrow(X) == length(all_texts))
+stopifnot(ncol(X) > 10)
+stopifnot(all(is.finite(X)))
+
+# --- 3) Cosine similarity ---
+cos_sim_safe <- function(a, b) {
+  denom <- sqrt(sum(a*a)) * sqrt(sum(b*b))
+  if (!is.finite(denom) || denom == 0) return(NA_real_)
+  sum(a*b) / denom
+}
+
+n_u <- nrow(df_lost2)
+i_emotion <- n_u + 1
+i_other   <- n_u + 2
+
+sim_emotion <- vapply(1:n_u, \(i) cos_sim_safe(X[i, ], X[i_emotion, ]), numeric(1))
+sim_other   <- vapply(1:n_u, \(i) cos_sim_safe(X[i, ], X[i_other, ]),   numeric(1))
+
+# --- 4) Results ---
+df_lost_scored <- df_lost2 %>%
+  mutate(
+    sim_to_lost_emotion = sim_emotion,
+    sim_to_lost_other  = sim_other,
+   lost_sense_margin   = sim_emotion - sim_other,
+    lost_sense_pred     = ifelse(lost_sense_margin > 0, "emotion_like", "other_like")
+  )
+
+# Quick summary
+mean(df_lost_scored$lost_sense_pred == "emotion_like", na.rm = TRUE)
+summary(df_lost_scored$lost_sense_margin)
+
+# Inspect extremes
+df_lost_scored %>% arrange(desc(lost_sense_margin)) %>% select(doc_id, .text, lost_sense_margin) %>% head(15) #lost closer to emotion
+df_lost_scored %>% arrange(lost_sense_margin) %>% select(.text, lost_sense_margin) %>% head(15)
+
+saveRDS(
+  df_lost_scored,
+  here("01Data", "02Derived","04S-BERT Scored", "df_lost_scored.rds")
+)
+```
+manual inspection
+
+```{r}
+df_lost_emotion_candidates <- df_lost_scored %>%
+  filter(lost_sense_margin > 0) %>% 
+ arrange(desc(lost_sense_margin)) %>% 
+  select(
+    doc_id,
+    text = .text,
+    lost_sense_margin
+  )
+
+write.csv(
+  df_lost_emotion_candidates,
+  here("01Data", "02Derived", "05Manual Inspectation", "Lost_Manual Inspectation.csv"),
+  row.names = FALSE
+)
+
+nrow(df_lost_emotion_candidates)
+```
+
+#### 3.8 *Quiet
+
+```{r}
+df_quiet <- readRDS(here("01Data", "02Derived", "01Dataframe","df_quiet_utterances.rds"))
+```
+
+```{r}
+
+# --- 0) Data ---
+text_col <- "text"
+stopifnot(text_col %in% names(df_quiet))
+
+df_quiet2 <- df_quiet %>%
+  mutate(.text = str_to_lower(.data[[text_col]])) %>%
+  filter(str_detect(.text, "\\bquiet\\b"))
+
+stopifnot(nrow(df_quiet2) > 0)
+
+# --- 1) Sense prototypes (blue: sad vs color) ---
+
+emotion_ref_quiet <- paste(
+  "feeling quiet",
+  "withdrawn silent subdued",
+  "not talking much",
+  "keeping to oneself",
+  "low energy",
+  "emotionally quiet",
+  "not very expressive today"
+)
+
+other_ref_quiet <- paste(
+  "be quiet",
+  "quiet room",
+  "quiet voice",
+  "no noise",
+  "silent environment",
+  "quiet place",
+  "sound level low"
+)
+
+all_texts <- c(df_quiet2$.text, emotion_ref_quiet, other_ref_quiet)
+
+# --- 2) Embeddings (sentence-transformers) ---
+
+X <- py_to_r(model$encode(all_texts))
+X <- as.matrix(X)
+storage.mode(X) <- "double"
+
+stopifnot(nrow(X) == length(all_texts))
+stopifnot(ncol(X) > 10)
+stopifnot(all(is.finite(X)))
+
+# --- 3) Cosine similarity ---
+cos_sim_safe <- function(a, b) {
+  denom <- sqrt(sum(a*a)) * sqrt(sum(b*b))
+  if (!is.finite(denom) || denom == 0) return(NA_real_)
+  sum(a*b) / denom
+}
+
+n_u <- nrow(df_quiet2)
+i_emotion <- n_u + 1
+i_other   <- n_u + 2
+
+sim_emotion <- vapply(1:n_u, \(i) cos_sim_safe(X[i, ], X[i_emotion, ]), numeric(1))
+sim_other   <- vapply(1:n_u, \(i) cos_sim_safe(X[i, ], X[i_other, ]),   numeric(1))
+
+# --- 4) Results ---
+df_quiet_scored <- df_quiet2 %>%
+  mutate(
+    sim_to_quiet_emotion = sim_emotion,
+    sim_to_quiet_other  = sim_other,
+   quiet_sense_margin   = sim_emotion - sim_other,
+    quiet_sense_pred     = ifelse(quiet_sense_margin > 0, "emotion_like", "other_like")
+  )
+
+# Quick summary
+mean(df_quiet_scored$quiet_sense_pred == "emotion_like", na.rm = TRUE)
+summary(df_quiet_scored$quiet_sense_margin)
+
+# Inspect extremes
+df_quiet_scored %>% arrange(desc(quiet_sense_margin)) %>% select(doc_id, .text, quiet_sense_margin) %>% head(15) #lost closer to emotion
+df_quiet_scored %>% arrange(quiet_sense_margin) %>% select(.text, quiet_sense_margin) %>% head(15)
+
+saveRDS(
+  df_quiet_scored,
+  here("01Data", "02Derived","04S-BERT Scored", "df_quiet_scored.rds")
+)
+```
+
+```{r}
+df_quiet_emotion_candidates <- df_quiet_scored %>%
+  filter(quiet_sense_margin > 0) %>% 
+ arrange(desc(quiet_sense_margin)) %>% 
+  select(
+    doc_id,
+    text = .text,
+    quiet_sense_margin
+  )
+
+write.csv(
+  df_quiet_emotion_candidates,
+  here("01Data", "02Derived", "05Manual Inspectation", "Quiet_Manual Inspectation.csv"),
+  row.names = FALSE
+)
+
+nrow(df_quiet_emotion_candidates)
+```
+
+
+```{r}
+df_strong_emotion_candidates <- df_strong_scored %>%
+  filter(strong_sense_margin > 0) %>% 
+ arrange(desc(strong_sense_margin)) %>% 
+  select(
+    doc_id,
+    text = .text,
+    strong_sense_margin
+  )
+
+write.csv(
+  df_strong_emotion_candidates,
+  here("01Data", "02Derived", "05Manual Inspectation", "Strong_Manual Inspectation.csv"),
+  row.names = FALSE
+)
+
+nrow(df_strong_emotion_candidates)
+```
+#### 3.11 *Low
+
+```{r}
+df_low <- readRDS(here("01Data", "02Derived", "01Dataframe","df_low_utterances.rds"))
+```
+
+```{r}
+
+# --- 0) Data ---
+text_col <- "text"
+stopifnot(text_col %in% names(df_gentle))
+
+df_low2 <- df_low %>%
+  mutate(.text = str_to_lower(.data[[text_col]])) %>%
+  filter(str_detect(.text, "\\blow\\b"))
+
+stopifnot(nrow(df_low2) > 0)
+
+# --- 1) Sense prototypes---
+
+# --- Sense prototypes (low: sadness/energy vs physical level/position) ---
+
+emotion_ref_low <- paste(
+  "feeling low",
+  "sad unhappy down depressed",
+  "low mood",
+  "feeling bad",
+  "feeling tired drained",
+  "low energy"
+)
+
+other_ref_low <- paste(
+  "low height",
+  "near the ground",
+  "low table chair",
+  "low number level price",
+  "low voice sound",
+  "low volume",
+  "low battery",
+  "low score"
+)
+
+
+all_texts <- c(df_low2$.text, emotion_ref_low, other_ref_low)
+
+# --- 2) Embeddings (sentence-transformers) ---
+
+X <- py_to_r(model$encode(all_texts))
+X <- as.matrix(X)
+storage.mode(X) <- "double"
+
+stopifnot(nrow(X) == length(all_texts))
+stopifnot(ncol(X) > 10)
+stopifnot(all(is.finite(X)))
+
+# --- 3) Cosine similarity ---
+cos_sim_safe <- function(a, b) {
+  denom <- sqrt(sum(a*a)) * sqrt(sum(b*b))
+  if (!is.finite(denom) || denom == 0) return(NA_real_)
+  sum(a*b) / denom
+}
+
+n_u <- nrow(df_low2)
+i_emotion <- n_u + 1
+i_other   <- n_u + 2
+
+sim_emotion <- vapply(1:n_u, \(i) cos_sim_safe(X[i, ], X[i_emotion, ]), numeric(1))
+sim_other   <- vapply(1:n_u, \(i) cos_sim_safe(X[i, ], X[i_other, ]),   numeric(1))
+
+# --- 4) Results ---
+df_low_scored <- df_low2 %>%
+  mutate(
+    sim_to_low_emotion = sim_emotion,
+    sim_to_low_other  = sim_other,
+   low_sense_margin   = sim_emotion - sim_other,
+    low_sense_pred     = ifelse(low_sense_margin > 0, "emotion_like", "other_like")
+  )
+
+# Quick summary
+mean(df_low_scored$low_sense_pred == "emotion_like", na.rm = TRUE)
+summary(df_low_scored$low_sense_margin)
+
+# Inspect extremes
+df_low_scored %>% arrange(desc(low_sense_margin)) %>% select(doc_id, .text, low_sense_margin) %>% head(15) #lost closer to emotion
+df_low_scored %>% arrange(low_sense_margin) %>% select(.text, low_sense_margin) %>% head(15)
+
+saveRDS(
+  df_low_scored,
+  here("01Data", "02Derived","04S-BERT Scored", "df_low_scored.rds")
+)
+```
+
+
+```{r}
+df_low_emotion_candidates <- df_low_scored %>%
+  filter(low_sense_margin > 0) %>% 
+ arrange(desc(low_sense_margin)) %>% 
+  select(
+    doc_id,
+    text = .text,
+    low_sense_margin
+  )
+
+write.csv(
+  df_low_emotion_candidates,
+  here("01Data", "02Derived", "05Manual Inspectation", "Low_Manual Inspectation.csv"),
+  row.names = FALSE
+)
+
+nrow(df_low_emotion_candidates)
+```
+
+
+  
+External: Objective descriptions (e.g., abandoned) or subjective evaluations (e.g., sexy)
+High Lost(psychologically) Quiet Strong(psychologically) Gentle
+Physical and Body States: Sick
+Affective condition: Blue
+certain - after excluding 
+low 
+
+High Lost(psychologically) Quiet Strong(psychologically) Gentle sick blue low
+
+Sanity check:
+
+```{r}
+id_to_check <- "3778"   # replace with a transcript id
+
+transcript_check <- utt_partners_emotions %>%
+  filter(transcript_id == id_to_check) %>%
+  select(transcript_id, speaker_code, gloss, emotion_count)
+
+transcript_check <- transcript_check %>%
+  filter(emotion_count > 0)
+
+transcript_check
+```
+
+Word counts: all partner
+
+```{r}
+ut_eng_na_rq1 <- ut_eng_na_rq1 %>%
+  mutate(
+    word_count = stringr::str_count(gloss, "\\S+")  # counts non-space sequences = words
+  )
+
+partner_word_counts <- ut_eng_na_rq1 %>%
+  group_by(transcript_id) %>%
+  summarise(
+    total_partner_words = sum(word_count, na.rm = TRUE),
+    total_partner_utterances = n()
+  )
+```
+
+### Step 5: Manual Inspectation for the rest of words (counts <100)
+
+```{r}
+manual_cols <-c("rotten","alarm","ill","tender","crushed","gloomy","faint","odd")
+manual_utt <- utt_partners_emotions %>%
+  filter(if_any(all_of(manual_cols), ~ .x > 0)) %>% mutate(
+    ambiguous_word = apply(
+      select(., all_of(manual_cols)),
+      1,
+      function(x) {
+        paste(manual_cols[x > 0], collapse = "|")
+      }
+    )
+  ) %>% 
+  select(ambiguous_word, id, gloss,role_category,gloss_lower)
+write.csv(
+  manual_utt,
+  here("01Data", "02Derived", "05Manual Inspectation", "Manual Inspectation.csv"),
+  row.names = FALSE
+)
+```
+
+All manually checked - to keep 
+```{r}
+blue_keep_ids <- c(
+  "17588871","1874322","2151231","576976","577638","726330"
+)
+
+lost_keep_ids <- c(
+  "1527894","1259827","17448315","2007599","2584319",
+  "17502496","1731805","1091706","1897272","2007639"
+)
+
+
+alarm_keep_ids <- c("1182355")
+
+crushed_keep_ids <- c("819179","1513079","17363655","17363695","17501726")
+
+faint_keep_ids <- c(
+  "554853","643331","666780","946715","946754","1146203",
+  "1954822","1954834","17271738","17327658"
+)
+
+gloomy_keep_ids <- c(
+  "1161295","1560492","2242059",
+  "17545451","17545507","17545531"
+)
+
+ill_keep_ids <- c(
+  "673511","749108","1006772","1049666","1071050","1071062",
+  "1071078","1071107","1331893","1331902","1468506","1479532",
+  "1550136","1951185","2291926","2356751"
+)
+
+odd_keep_ids <- c("1266039",
+"368924","375262","543852","581460","581510","581543","582494","582616","582957","583214","584559","584734","629928","658670","664948","665055","665068","670460","1438454","1456906","1458011","1477736","1491850","1492446","1504646","1504746","1504828","1507783",
+"1507797","1513593","1516144","1520108","1520172","1521941","1526837","1526990","1529600","1534672","1539931","1541834","1545547","1547160","1563228","1563314","1567252","1567909","1567928","1569065","1571522","1897872","2145584","2166605","2357234","2575441","2575454","2575511","2575536","2575565","2575589","2575613","2579033","2602494","2815642","2824508","2826951","2829779","2837529",
+"17287014","17438120","17512577","17516705","17516732","17516744","17524422","17524578","17524592","17529103","17529114","17532831","17537369","17537397","17699852")
+
+rotten_keep_ids <- c("749197","1104561","1476204","1733024","1743442","2042892","2042927","2042961","2052260","2055194","2055386","2055427","2055975","2056072","2056162","2056193","2061308","2065633","2065813","2076216","2076561","2076830","2078829","2079116","2299477")
+
+tender_keep_ids <- c( "1110743","1289804","1339572","1478498","1733271","2134420","2155854")
+```
+###Step 6 Merge back
+
+```{r}
+
+utt_partners_emotions_merged <- utt_partners_emotions %>%
+  mutate(
+    blue = if_else(id %in% blue_keep_ids, blue, 0L),
+    lost = if_else(id %in% lost_keep_ids, lost, 0L),
+    alarm = if_else(id %in% alarm_keep_ids, alarm, 0L), crushed = if_else(id %in% crushed_keep_ids, crushed, 0L), faint = if_else(id %in% faint_keep_ids, faint, 0L), gloomy = if_else(id %in% gloomy_keep_ids, gloomy, 0L), ill = if_else(id %in% ill_keep_ids, ill, 0L),
+    odd = if_else(id %in% odd_keep_ids, odd, 0L),rotten = if_else(id %in% rotten_keep_ids, rotten, 0L),tender = if_else(id %in% tender_keep_ids, tender, 0L)
+  )
+
+utt_partners_emotions_merged <- utt_partners_emotions_merged %>%
+  mutate(id = as.character(id)) %>%
+  left_join(
+    like_counts_by_doc %>%
+      mutate(doc_id = as.character(doc_id)) %>%
+      select(doc_id, n_like_emotion),
+    by = c("id" = "doc_id")
+  ) %>%
+  mutate(
+    like = coalesce(n_like_emotion, 0L)
+  ) %>%
+  select(-n_like_emotion)
+
+utt_partners_emotions_merged <- utt_partners_emotions_merged %>%
+  mutate(id = as.character(id)) %>%
+  left_join(
+    well_counts_by_doc %>%
+      mutate(doc_id = as.character(doc_id)) %>%
+      select(doc_id, n_well_emotion),
+    by = c("id" = "doc_id")
+  ) %>%
+  mutate(
+    well = coalesce(n_well_emotion, 0L)
+  ) %>%
+  select(-n_well_emotion)
+
+utt_partners_emotions_merged <- utt_partners_emotions_merged %>%
+  mutate(id = as.character(id)) %>%
+  left_join(
+    kind_counts_by_doc %>%
+      mutate(doc_id = as.character(doc_id)) %>%
+      select(doc_id, n_kind_emotion),
+    by = c("id" = "doc_id")
+  ) %>%
+  mutate(
+    kind = coalesce(n_kind_emotion, 0L)
+  ) %>%
+  select(-n_kind_emotion)
+
+
+utt_partners_emotions_merged <- utt_partners_emotions_merged %>%
+  mutate(id = as.character(id)) %>%
+  left_join(
+    fine_emotion_counts %>%
+      mutate(doc_id = as.character(doc_id)) %>%
+      select(doc_id, n_fine_emotion),
+    by = c("id" = "doc_id")
+  ) %>%
+  mutate(
+    fine = coalesce(n_fine_emotion, 0L)
+  ) %>%
+  select(-n_fine_emotion)
+
+
+saveRDS(utt_partners_emotions_merged,
+        here("01Data","02Derived","utt_partners_emotions_merged.rds"))
+
+utt_partners_emotions_merged <- readRDS(
+  here("01Data","02Derived","utt_partners_emotions_merged.rds")
+)
+
+utt_partners_emotions_merged <- utt_partners_emotions_merged %>%
+  mutate(id = as.character(id)) %>%
+  left_join(
+    merry_emotion_counts %>%
+      mutate(doc_id = as.character(doc_id)) %>%
+      select(doc_id, n_merry_emotion),
+    by = c("id" = "doc_id")
+  ) %>%
+  mutate(
+    merry = coalesce(n_merry_emotion, 0L)
+  ) %>%
+  select(-n_merry_emotion)
+
+utt_partners_emotions_merged <- utt_partners_emotions_merged %>%
+  mutate(id = as.character(id)) %>%
+  left_join(
+    moved_emotion_counts %>%
+      mutate(doc_id = as.character(doc_id)) %>%
+      select(doc_id, n_moved_emotion),
+    by = c("id" = "doc_id")
+  ) %>%
+  mutate(
+    moved = coalesce(n_moved_emotion, 0L)
+  ) %>%
+  select(-n_moved_emotion)
+
+utt_partners_emotions_merged <- utt_partners_emotions_merged %>%
+  mutate(id = as.character(id)) %>%
+  left_join(
+   certain_emotion_counts %>%
+      mutate(doc_id = as.character(doc_id)) %>%
+      select(doc_id, n_certain_emotion),
+    by = c("id" = "doc_id")
+  ) %>%
+  mutate(
+    certain = coalesce(n_certain_emotion, 0L)
+  ) %>%
+  select(-n_certain_emotion)
+
+
+utt_partners_emotions_merged <- utt_partners_emotions_merged %>%
+  mutate(id = as.character(id)) %>%
+  left_join(
+   touched_emotion_counts %>%
+      mutate(doc_id = as.character(doc_id)) %>%
+      select(doc_id, n_touched_emotion),
+    by = c("id" = "doc_id")
+  ) %>%
+  mutate(
+    touched = coalesce(n_touched_emotion, 0L)
+  ) %>%
+  select(-n_touched_emotion)
+
+utt_partners_emotions_merged <- utt_partners_emotions_merged %>%
+  mutate(id = as.character(id)) %>%
+  left_join(
+   patient_emotion_counts %>%
+      mutate(doc_id = as.character(doc_id)) %>%
+      select(doc_id, n_patient_emotion),
+    by = c("id" = "doc_id")
+  ) %>%
+  mutate(
+    patient = coalesce(n_patient_emotion, 0L)
+  ) %>%
+  select(-n_patient_emotion)
+
+#Exclude high
+utt_partners_emotions_merged <- utt_partners_emotions_merged %>%
+  mutate(high = 0L)
+```
+#### save output
+```{r}
+utt_partners_emotions_merged <- utt_partners_emotions_merged %>%
+  mutate(
+    emotion_count = rowSums(
+      pick(all_of(emotion_words)),
+      na.rm = TRUE
+    )
+  )
+
+saveRDS(utt_partners_emotions_merged,
+        here("01Data","02Derived","FINAL_utt_partners_emotions_merged.rds"))
+```
+
+##Sanity Check 
+```{r}
+
+utt_partners_emotions_merged %>%
+  filter(id == "2822644") %>%
+  select(id,gloss, like)
+```
+
+
+
+
+
+Exclude: Low
+To check: 
+Quiet/ Strong - subtle difference 
+Pride Rock/ Mock Meek
+
+Questions:
+
+-   would you like one - counted as non-emotion in this version (ADP) as it appeared in a polite preference question
+
+-   how can i be fully confident that I did not exclude other uses of "like" that may broadly refer to emotion?
