@@ -1,440 +1,192 @@
+# EmotionTalkThesis
+
+**Are children more likely to use emotion words when their conversational partner does?**
+
+This repository contains the analysis pipeline for a thesis examining emotion word use in naturalistic child-caregiver conversations, using the CHILDES English-North America corpus.
+
 ---
-editor_options: 
-  markdown: 
-    wrap: 72
+
+## Research Questions
+
+- **RQ1** — Is a conversational partner's use of emotion words associated with the target child's emotion word use? (negative binomial mixed-effects model)
+- **RQ2** — Do emotion words recur across conversational turns? (CRQA)
+- **RQ3** — Is there a directional influence in emotion word use between children and partners? (CRQA)
+
 ---
 
-## **Thesis: are children more likely to talk about emotion when their conversational partner do?**
+## Dataset
+
+- **Source:** CHILDES English-North America, accessed via the [`childesr`](https://github.com/langcog/childes-db) package (database version 2021.1)
+- **Emotion word list:** Clore, Ortony & Foss (1987) Affective Lexicon — `1987-Affectivelexicon-foundations_words.csv`
+
+---
+
+## Prerequisites
+
+**R packages** (loaded via `00_setup.R`):
+`here`, `childesr`, `dplyr`, `tidyr`, `purrr`, `stringr`, `ggplot2`, `quanteda`, `irlba`, `spacyr`, `tidyverse`, `lme4`, `glmmTMB`, `crqa`
+
+**Python** (required for spaCy disambiguation):
+```bash
+pip install spacy sentence-transformers
+python -m spacy download en_core_web_sm
+```
+
+---
+
+## Repository Structure
+
+```
+ThesisDataAnalysis/
+├── 00_setup.R                          # Load all packages
+├── 00ThesisDataAnalysis.Rproj          # R project file
+├── 1987-Affectivelexicon-foundations_words.csv
+│
+├── 01Data/
+│   ├── 01Childes/                      # Raw CHILDES data (downloaded by 01LoadData.R)
+│   └── 02Derived/                      # Intermediate & processed data
+│       ├── 01Dataframe/                # Per-word utterance subsets (spaCy input)
+│       ├── 02Spacy Parsed/             # spaCy POS/dependency parse results
+│       ├── 03Annotation/               # Word-level annotation counts
+│       ├── 04S-BERT Scored/            # S-BERT cosine similarity scores
+│       ├── 05Manual Inspectation/      # Manual review files
+│       ├── Amb_words_examples.xlsx     # Ambiguous word examples
+│       └── Manual-checked.xlsx         # Manual coding results
+│
+├── 02Script/                           # Analysis scripts (run in order)
+│   ├── 01LoadData.R
+│   ├── 02Demographics.qmd
+│   ├── 03RoleMap.R
+│   ├── 04RQ1_utt_emotion.R
+│   ├── 05RQ1Pipeline.qmd
+│   ├── 06SpacyRTagging_RQ1.R
+│   ├── 07RQ1DataAnalysis.qmd
+│   ├── 08RQ2DataAnalysisCRQA.Rmd
+│   └── m_main_nb_glmmTMB.rds           # Fitted glmmTMB model
+│
+└── 03Output/                           # Figures and summary tables
+```
 
-RQ1: Partner use of emotion words
+> **Note:** Several large `.rds` files (>50 MB) are excluded from this repository but are required to run the pipeline from intermediate steps. See [Large Files](#large-files) below.
 
-RQ2: CRQA, recurrence of emotion words
+---
 
-RQ3: CRQA, direction of emotion words influence
+## Pipeline
 
-**Dataset**:
+Run scripts in the following order from the R project root.
 
-CHILDES - English - North America
+### Step 1 — Load raw data
+**`02Script/01LoadData.R`**
 
-Transcript:
+Downloads transcripts, utterances, and target child participant data from CHILDES via the `childesr` API. Saves to `01Data/01Childes/`.
 
-Word Count:
+```
+Outputs:
+  01Data/01Childes/d_eng_na_transcripts.rds
+  01Data/01Childes/ut_eng_na_utterances.rds   # 97 MB — excluded from git
+  01Data/01Childes/d_target_child.rds
+```
 
-**Participant information :**
+### Step 2 — Demographics
+**`02Script/02Demographics.qmd`**
 
-Target Children: Age, Sex
+Descriptive statistics: transcript count, utterance counts by speaker role.
 
-Conversational Partner: Role, SES, education
+### Step 3 — Role mapping
+**`02Script/03RoleMap.R`**
 
-**conversational partner categorisation:**
+Defines `role_category_map`, mapping raw CHILDES `speaker_role` values to seven categories used throughout the analysis:
 
-**Word List:**
+| Category | CHILDES Roles |
+|---|---|
+| Target Child | Target_Child |
+| Mother | Mother |
+| Father | Father |
+| Sibling | Sister, Brother, Sibling |
+| Known Adult | Grandmother, Grandfather, Relative, Caretaker, Caregiver, Teacher |
+| Other Child | Child, Friend, Playmate, Student, Girl, Teenager |
+| Other Adult | Unidentified, Adult, Media, Visitor, Participant, Environment, Male, Uncertain, Investigator |
 
-1987 Affective Lexicon Foundation
+Sourced automatically by later scripts via `source(here("02Script", "03RoleMap.R"))`.
 
-<https://langcog.github.io/childes-db-website/api.html>
+### Step 4 — Emotion word counts
+**`02Script/04RQ1_utt_emotion.R`**
 
-### **RQ1 PIPELINE**
+- Excludes transcripts where only the target child speaks (no conversational partner)
+- Counts occurrences of each emotion word (whole-word regex) per utterance
+- Saves utterance-level dataframe with one column per emotion word
 
-**Data Preparation:**
+```
+Output: 01Data/02Derived/utt_partners_emotions.rds   # 124 MB — excluded from git
+```
 
-Transcript: exclude if only target child produced words
+### Step 5 — RQ1 disambiguation pipeline
+**`02Script/05RQ1Pipeline.qmd`**
 
-Extract conversational partner utterances
+Merges disambiguation results (spaCy POS corrections and S-BERT scores) back into the main dataframe. Produces the cleaned final dataset used in statistical modelling.
 
-Groups back based on transcript -\> word count by transcript
+```
+Output: 01Data/02Derived/FINAL_utt_RQ1_emotions_merged.rds   # 125 MB — excluded from git
+```
 
-Create target word list -\> Clore and Collegue 1987
+### Step 6 — Disambiguation: spaCy POS tagging
+**`02Script/06SpacyRTagging_RQ1.R`**
 
-key dataframe: counts of each emotion words per utterance:
-utt_partners_emotions saved as xxx
+Applies `spacyr` POS and dependency parsing to utterances containing high-frequency ambiguous emotion words. Word-level inclusion/exclusion rules:
 
-counts of each emotion words in total
+| Word | Kept when | Excluded when |
+|---|---|---|
+| *like* | POS = VERB, or modal preference question (*would/do/can you like…*) | All other POS (ADP, discourse marker) |
+| *well* | POS = ADJ or ADV | Sentence-initial, standalone, or *as well* constructions |
+| *kind* | POS = ADJ | Category use (e.g., *that kind of…*) |
+| *fine* | Followed by a noun | Standalone / sentence-initial (discourse management) |
 
- 
+Parse results saved per word to `01Data/02Derived/02Spacy Parsed/`.
 
-+--------------+------------------------------------------------------+
-| **Category​** | **Original Speaker Role in Data​**                    |
-+--------------+------------------------------------------------------+
-| Target ​      | Target Child​                                         |
-|              |                                                      |
-| Child​        |                                                      |
-+--------------+------------------------------------------------------+
-| Mother​       | Mother ​                                              |
-+--------------+------------------------------------------------------+
-| Father​       | Father​                                               |
-+--------------+------------------------------------------------------+
-| Sibling​      | Sister, Brother, Sibling​                             |
-+--------------+------------------------------------------------------+
-| Known ​       | Grandmother, Grandfather, Relative, Caretaker,       |
-|              | Caregiver, Teacher​                                   |
-| Adult​        |                                                      |
-+--------------+------------------------------------------------------+
-| Other ​       | Unidentified, Adult, Media, Visitor, Participant,    |
-|              | Environment, Male, Uncertain, Investigator​           |
-| Adult​        |                                                      |
-+--------------+------------------------------------------------------+
-| Other ​       | Child, Friend, Playmate, Student, Girl, Teenager​     |
-|              |                                                      |
-| Child​        |                                                      |
-+--------------+------------------------------------------------------+
+For words where POS tagging is insufficient (*blue*, *high*, *low*, *lost*, *quiet*), **S-BERT semantic similarity** is used: utterances are embedded with `all-MiniLM-L6-v2` and classified by cosine similarity to emotion vs. non-emotion prototype sentences. Scored outputs saved to `01Data/02Derived/04S-BERT Scored/`.
 
-### Problem 1. Disambiguation
+### Step 7 — RQ1 statistical analysis
+**`02Script/07RQ1DataAnalysis.qmd`**
 
-#### Rationale
+- Descriptive statistics: emotion word frequencies per 1,000 words, by role
+- Negative binomial mixed-effects model via `glmmTMB`
+- Fitted model saved as `02Script/m_main_nb_glmmTMB.rds`
+- Summary tables and figures saved to `03Output/`
 
-Some emotion-related words in conversational English are polysemous and
-frequently occur in non-emotional contexts (e.g., *like* as a discourse
-marker or comparator). Including these uses risks inflating emotion-word
-counts. Therefore, a targeted disambiguation procedure was applied to a
-subset of potentially ambiguous emotion words.Manually go through 20
-example utterances in each of the 100 emotion word to identify usage
-pattern
+### Step 8 — RQ2/RQ3 CRQA analysis
+**`02Script/08RQ2DataAnalysisCRQA.Rmd`**
 
-### Step 1: Identifying potentially ambiguous emotion words
+Cross-recurrence quantification analysis (CRQA) on turn-level emotion word counts, comparing target child turns against social partner turns.
 
-1.  Emotion words were first ranked by overall frequency.
-2.  The **emotion words** \> 10 were examined.
-3.  For each candidate word, **20 example utterances** were manually
-    inspected.
-    <!--# To be considered: as part of screening, take 20 examples from all emotion words, 1. ask spacyr to tag POS, those appearing with multiple POS usage can be then manually examined 2. cross referencing with LIWC-->
-4.  Words that frequently appeared in **non-emotional, discourse,
-    comparative, or pragmatic uses** were flagged as *potentially
-    ambiguous*.
+---
 
--\> **sub-list of ambiguous emotion words**, which were subjected to
-further disambiguation.
+## Large Files
 
-<div>
+These files exceed GitHub's 50 MB threshold and are excluded from the repository via `.gitignore`. They are kept locally as intermediate checkpoints — R scripts can resume from any step without rerunning the full pipeline from scratch.
 
-**Rationale**: First, many emotion words are used almost exclusively in
-emotional contexts; applying disambiguation to these items would add
-complexity without improving measurement precision. Second, prior
-research consistently shows that emotion words are relatively rare in
-naturalistic conversation, and that higher-frequency emotion words are
-more likely to be polysemous and to occur in non-emotional discourse
-contexts (e.g., as discourse markers or comparatives).
+| File | Size | Produced by |
+|---|---|---|
+| `01Data/01Childes/ut_eng_na_utterances.rds` | 97 MB | `01LoadData.R` |
+| `01Data/02Derived/utt_partners_emotions.rds` | 124 MB | `04RQ1_utt_emotion.R` |
+| `01Data/02Derived/utt_partners_emotions_merged.rds` | 125 MB | `05RQ1Pipeline.qmd` |
+| `01Data/02Derived/FINAL_utt_RQ1_emotions_merged.rds` | 125 MB | `05RQ1Pipeline.qmd` |
+| `01Data/02Derived/FINAL_utt_partners_emotions_merged.rds` | 83 MB | `05RQ1Pipeline.qmd` |
+| `01Data/02Derived/utt_child_emotions.rds` | 43 MB | `04RQ1_utt_emotion.R` |
 
-</div>
+To reproduce these files, run the pipeline from Step 1.
 
-### Step 2: Creating a subset of utterances containing ambiguous words
+---
 
-A sub-dataframe was created containing the ambiguous words greater than
-10 times. Only utterance-level identifiers and relevant linguistic
-fields were retained. Identify ambiguous words. Words with low frequency
-(\< 100 tokens) -\> *manual coding (*higher accuracy, feasible workload)
-Words with high frequency (≥ 100 tokens) -\> *automated disambiguation
-(spaCy)*
+## Outputs
 
-low frequency:
+All final figures and tables are in `03Output/`:
 
-|         |     |     |     |     |
-|:--------|----:|-----|-----|-----|
-| rotten  |  75 |     |     |     |
-| pride   |  63 |     |     |     |
-| alarm   |  60 |     |     |     |
-| ill     |  39 |     |     |     |
-| tender  |  39 |     |     |     |
-| crushed |  15 |     |     |     |
-| gloomy  |  13 |     |     |     |
-| meek    |  12 |     |     |     |
-| faint   |     |     |     |     |
-
-<div>
-
-**Rationale**: This reduced dataset allowed targeted experimentation
-without modifying the full corpus.To improve computational efficiency
-and focus analyses on relevant cases:
-
-</div>
-
-share **identical syntactic frames**
-
-### Step 3: Method 1 — Unsupervised NLP (exploratory)
-
-#### 3.1 Utterance-level clustering
-
-As an exploratory approach, unsupervised clustering was applied to
-
--   full utterances containing ambiguous words
-
--   using sentence embeddings and clustering
-
-#### 3.2 Context-window clustering
-
-To increase sensitivity to local usage:
-
--   **context windows** of ±3 tokens (k = 3) were extracted around
-    ambiguous words
-
-<!-- -->
-
--   clustering was repeated at the **window level**
-
-#### 3.3 Word-specific refinement (“like”)
-
-Given the high frequency and polysemy of *like*, analyses were refined
-by:
-
--   excluding fixed constructions such as *“look(s) like”*
-
--   removing discourse fillers (e.g., *“um”*)
-
--   re-running clustering on the cleaned subset
-
-Cluster outputs and diagnostics were saved for documentation and
-discussion：
-
-e.g. ambiguous_utterance_clustered.csv
-
-<div>
-
-**Outcome**: While clustering revealed broad usage patterns, clusters
-were not sufficiently aligned with semantic distinctions of interest to
-serve as a definitive disambiguation method.
-
-</div>
-
-### Step 4: Method 2 — POS and dependency-based disambiguation (spaCy) (used in the coding)
-
-Given the limitations of unsupervised clustering, a **rule-based
-linguistic approach** was applied to the word *like* using **spaCy via
-spacyr**.
-
-#### 4.1 POS-based filtering
-
-spaCy part-of-speech tags were used to identify the grammatical role of
-*like.* Uses of *like* were retained **only when tagged as a VERB**,
-corresponding to preference or affective meaning (e.g., *“I like
-apples”*)
-
-#### 4.2 Error inspection: Preference-question exception
-
-Error inspection revealed that spaCy occasionally tagged *like* as an
-adposition in **polite preference constructions** (e.g., *“would you
-like one?”*).\
-
-To retain these affectively relevant uses, an additional rule was
-applied to include:
-
-modal preference questions (*would/do/can you like …*)
-
-All other POS categories (e.g., ADP, discourse-marker uses) were
-excluded.
-
-#### Word-level Rules
-
-+---------------+---------------+---------------+---------------+
-| Word          | Inclusion     | Exclusion     | Notes         |
-|               | Rules (1st)   | Rules (2nd)   |               |
-+===============+===============+===============+===============+
-| Like          | POS=VERB + if |               |               |
-|               | used as a     |               |               |
-|               | preference    |               |               |
-|               | checking      |               |               |
-|               | (             |               |               |
-|               | would\|could\ |               |               |
-|               | \|            |               |               |
-|               | can\|do\|did) |               |               |
-+---------------+---------------+---------------+---------------+
-| Well          | POS = ADJ +   | single-word   |               |
-|               | ADV (he is    | utterances    |               |
-|               | doing well)   | (e.g. well.), |               |
-|               |               | se            |               |
-|               |               | n             |               |
-|               |               | tence-initial |               |
-|               |               | (e.g. well    |               |
-|               |               | this is       |               |
-|               |               | because... )  |               |
-|               |               | as well (e.g. |               |
-|               |               | I like it as  |               |
-|               |               | well; i like  |               |
-|               |               | a as well as  |               |
-|               |               | b)            |               |
-+---------------+---------------+---------------+---------------+
-| Kind          | POS = ADJ     | category word | still         |
-|               |               | (e.g."that    | including     |
-|               |               | kind" )       | (e.g.         |
-|               |               |               | strawberry    |
-|               |               |               | kind) may     |
-|               |               |               | need to       |
-|               |               |               | explicitly    |
-|               |               |               | exclude.      |
-+---------------+---------------+---------------+---------------+
-| fine          | next token    | stand alone/  | Descriptive   |
-|               | POS = Noun    | starting the  | adjective     |
-|               |               | sentence      | (quality /    |
-|               |               |               | aesthetic) “a |
-|               |               |               | fine lady” “a |
-|               |               |               | fine river” → |
-|               |               |               | “fine” =      |
-|               |               |               | property of   |
-|               |               |               | an            |
-|               |               |               | o             |
-|               |               |               | bject/person, |
-|               |               |               | not a         |
-|               |               |               | psychological |
-|               |               |               | state         |
-|               |               |               | Standalone /  |
-|               |               |               | turn-initial  |
-|               |               |               | “fine”        |
-|               |               |               | (discourse    |
-|               |               |               | management)   |
-|               |               |               | “fine.”       |
-|               |               |               | “fine—okay,   |
-|               |               |               | now count.”   |
-+---------------+---------------+---------------+---------------+
-| High / Blue   | ?             |               |               |
-+---------------+---------------+---------------+---------------+
-
-### **Step 4: S-BERT**
-
-POS tagging removes many non-emotion uses, but some ambiguous words
-(e.g., *blue, high, low, lost*) stay ambiguous even with the same POS
-(often adjectives). This step adds **context-sensitive disambiguation**
-so we don’t wrongly count non-emotion meanings as emotion talk. **Step
-1 - Subset utterances for the target ambiguous word**
-
-Filter the utterance-level dataframe to rows where the word appears as a
-**whole token** (e.g., \\\\bblue\\\\b).
-
-**Rationale:** Disambiguation is only needed where the ambiguous word is
-present; token matching avoids false matches (e.g., *blue* vs
-*blueberry*).
-
-**Step 2 — Define two sense prototypes (emotion vs non-emotion)**
-
-Create two “anchors” representing the competing meanings (e.g.,
-*blue-as-sad* vs *blue-as-color*).
-
--   Prototypes can be either:
-
-    **(A) short researcher-defined reference texts**, or
-
-    **(B) a small set of clearly unambiguous CHILDES utterances** for
-    each sense.
-
--   **Rationale:** Turns disambiguation into a semantic similarity
-    problem; CHILDES-based prototypes reduce phrasing bias and stay
-    corpus-consistent.
-
-**Step 3 — Embed utterances and prototypes using a sentence-embedding
-model**
-
-Use a pretrained **Sentence-Transformers** model (all-MiniLM-L6-v2) to
-encode each utterance and each prototype into a fixed-length vector.
-
-Rationale**:** Sentence embeddings capture **contextual meaning**,
-allowing the same surface word (e.g., “blue”) to map differently
-depending on surrounding words.
-
-**Step 4 — Compute similarity to each prototype**
-
-For each utterance, compute **cosine similarity** to the emotion
-prototype and to the non-emotion prototype.
-
-**Rationale:** Cosine similarity is standard for comparing embeddings;
-it measures semantic closeness in the shared embedding space.
-
-**Step 5 — Derive an “emotion-likeness” margin score and classify**
-
-Compute margin = sim_emotion − sim_nonemotion.
-
-Classify as **emotion-like** if margin \> 0; **non-emotion-like**
-otherwise (optionally add a neutral band around 0).
-
-**Rationale:** The margin gives an interpretable continuous score
-(strength of evidence) and a simple transparent decision rule.
-
-**Step 6 — Write results back to the dataset for downstream counting**
-
-Add sim_emotion, sim_nonemotion, margin, and predicted_sense columns to
-the utterance-level dataframe.
-
-Use predicted_sense to **retain** only emotion-like uses for
-emotion-word counts (or to exclude the word entirely if emotion-like
-uses are rare).
-
-**Rationale:** Keeps the pipeline reproducible and makes later
-auditing/threshold tuning straightforward.
-
-**Step 7 — Validation / audit (recommended)**
-
-Manually inspect a sample of utterances near the decision boundary
-(margin ≈ 0) and at both extremes.
-
-Optionally estimate agreement by hand-labeling \~50–100 cases per word.
-
-**Rationale:** Provides evidence that the automated rule aligns with
-human judgments and identifies where prototypes/thresholds need
-adjustment. rules:
-
-+-----------+-----------------------+-----------+
-| Word      | Mean                  | Original  |
-|           |                       | N         |
-+===========+=======================+===========+
-| High      | ```                   | 830 -\> 0 |
-|           | 0.09759036            |           |
-|           |    Min. 1st Qu.  Med  |           |
-|           | ian                   |           |
-|           |  Mean 3rd Qu.    Max. |           |
-|           | -0.4404 -0.2397 -0.1  |           |
-|           | 514 -0                |           |
-|           | .1485 -0.0687  0.1850 |           |
-|           | ```                   |           |
-+-----------+-----------------------+-----------+
-| Blue      | ```                   | 4306      |
-|           | 0.091268              |           |
-|           |     Min.  1st Qu.     |           |
-|           |    Med                |           |
-|           | ian     Mean  3rd Qu. |           |
-|           | -0.43059 -0.10753     |           |
-|           |  -0.07                |           |
-|           | 978 -0.07449 -0.03754 |           |
-|           |     Max.              |           |
-|           |  0.32633              |           |
-|           | ```                   |           |
-+-----------+-----------------------+-----------+
-|           |                       |           |
-+-----------+-----------------------+-----------+
-
-"like","well","kind","blue","fine","merry","moved","certain","sore",
-,"rotten","pride","tender","gloomy","meek","faint"
-
-POS: "crushed" "alarm" "touched""patient""odd" "ill"
-
-"high","blue","lost","quiet", "strong","low",
-
-Now trying 30th Dec (NLP) - clustering not making sense as its based on
-utterances, not related to word-level usage
-
-1.  whole utterance, clustered into 5 -\> saved as
-    ambiguous_utterance_clustered.csv
-
-2.  +- 3 words window, saved as
-
-Options: part of speech tagging, rule-based exclusion, machine learning
-
--   problem 2. not based on partner
-
--\> roles
-
-Total word count:
-
--   problem 1. not by roles
-
--   problem 2. might be embedded within frequency count
-
-Identify target words list
-
-Group conversational partner
-
-<Notes:level> of precision - actual emotion / all targeted as emotion
-
--\> how many do we need to review to feel confident?
-
-Standard error
-
-level of precision at 90%, 95% confidence interval -\> 220 utterance
-
-### RQ2 and RQ3 PIPELINE
+| File | Description |
+|---|---|
+| `emotion word count and frequency.csv` | Overall emotion word counts and frequency per 1,000 words |
+| `emotion word count and frequency_by role.csv` | Emotion word frequency broken down by speaker role |
+| `MERGED emotion word count and frequency.csv` | Post-disambiguation merged frequency table |
+| `Emotion Word Use.png` | Overall emotion word use plot |
+| `Emotion Word Use by Children.png` | Emotion word use — target child |
+| `Emotion Word Use by Adult.png` | Emotion word use — adult partners |
+| `fig_role_distribution.png` | Distribution of speaker roles across transcripts |
