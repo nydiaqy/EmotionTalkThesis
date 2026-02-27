@@ -185,6 +185,7 @@ All final figures and tables are in `03Output/`:
 | `emotion word count and frequency_by role.csv` | Emotion word frequency broken down by speaker role |
 | `MERGED emotion word count and frequency.csv` | Post-disambiguation merged frequency table |
 | `Emotion Word Use.png` | Overall emotion word use plot |
+| `Emotion Word Use by Parent.png` | Emotion word use — Mother and Father vs target child age |
 | `Emotion Word Use by Children.png` | Emotion word use — child social partners (siblings and other children) |
-| `Emotion Word Use by Adult.png` | Emotion word use — non-parent adult partners (excludes Mother and Father) |
+| `Emotion Word Use by Adult.png` | Emotion word use — non-parent adult partners (Known Adult, Other Adult) |
 | `fig_role_distribution.png` | Distribution of speaker roles across transcripts |
