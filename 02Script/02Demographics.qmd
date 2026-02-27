@@ -108,7 +108,7 @@ count_by_role <- count_by_role %>%
 count_by_role_exc_child
 
 #Sanity check 
-count_by_role_exc_child %>%
+count_by_role %>%
   filter(is.na(role_category)) %>%
   distinct(speaker_role)
 ```
@@ -116,7 +116,7 @@ count_by_role_exc_child %>%
 Number of participant, transcripts, utterance by each category
 
 ```{r}
-count_by_category <- count_by_role_exc_child %>%
+count_by_category <- count_by_role %>%
   group_by(role_category) %>%
   summarise(
     n_speakers    = sum(n_speakers),

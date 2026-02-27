@@ -229,10 +229,18 @@ new_data <- new_data %>%
       ))
     )
 
+#plotting all social partners 
 p <- ggplot(new_data,
             aes(x = target_child_age_years, y = fit,
-                color = role_category, fill = role_category)) +
-  geom_line(linewidth = 1) +
+                color = role_category, fill = role_category)) + geom_line(
+    data = subset(new_data, role_category == "Target Child"),
+    linewidth = 1.8
+  )+
+  geom_line(
+    data = subset(new_data, role_category != "Target Child"),
+    linewidth = 1
+  ) +
+  # 3️⃣ Target Child line + bold)
   geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.2, colour = NA) +
   scale_x_continuous(breaks = seq(0, 12, by = 1),
                      limits = c(age_min_y, age_max_y)) +
@@ -252,14 +260,180 @@ p <- ggplot(new_data,
   )
 print(p)
 
+#plotting all children partners 
+
+
+roles_keep <- c("Target Child", "Other Child", "Sibling")
+
+new_data_3 <- new_data %>%
+  filter(role_category %in% roles_keep) %>%
+  mutate(
+    role_category = factor(role_category, levels = roles_keep)
+  )
+
+p_child <- ggplot(
+  new_data_3,
+  aes(
+    x = target_child_age_years,
+    y = fit,
+    color = role_category,
+    fill  = role_category
+  )
+) +
+  geom_line(
+    data = subset(new_data_3, role_category == "Target Child"),
+    linewidth = 1.8
+  ) +
+  geom_line(
+    data = subset(new_data_3, role_category != "Target Child"),
+    linewidth = 1
+  ) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper),
+              alpha = 0.2, colour = NA) +
+  scale_x_continuous(
+    breaks = seq(0, 12, by = 1),
+    limits = c(age_min_y, age_max_y)
+  ) +
+  coord_cartesian(ylim = c(0, 25)) +
+  labs(
+    title = "Emotion Words of Children by Target Child Age",
+    x = "Age (years)",
+    y = "Expected Count Per 1,000 Words"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.title = element_blank(),
+    legend.position = "bottom",
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+print(p_child)
+
 ggsave(
-  filename = here::here("03Output", "Emotion Word Use.png"),
-  plot = p,
+  filename = here::here("03Output", "Emotion Word Use by Children.png"),
+  plot = p_child,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+#plotting all parent partners 
+
+
+roles_keep <- c("Target Child", "Mother", "Father")
+
+new_data_2 <- new_data %>%
+  filter(role_category %in% roles_keep) %>%
+  mutate(
+    role_category = factor(role_category, levels = roles_keep)
+  )
+
+p_parent <- ggplot(
+  new_data_2,
+  aes(
+    x = target_child_age_years,
+    y = fit,
+    color = role_category,
+    fill  = role_category
+  )
+) +
+  geom_line(
+    data = subset(new_data_2, role_category == "Target Child"),
+    linewidth = 1.8
+  ) +
+  geom_line(
+    data = subset(new_data_2, role_category != "Target Child"),
+    linewidth = 1
+  ) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper),
+              alpha = 0.2, colour = NA) +
+  scale_x_continuous(
+    breaks = seq(0, 12, by = 1),
+    limits = c(age_min_y, age_max_y)
+  ) +
+  coord_cartesian(ylim = c(0, 25)) +
+  labs(
+    title = "Emotion Words of Parent by Target Child Age",
+    x = "Age (years)",
+    y = "Expected Count Per 1,000 Words"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.title = element_blank(),
+    legend.position = "bottom",
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+print(p_parent)
+
+ggsave(
+  filename = here::here("03Output", "Emotion Word Use by Parent.png"),
+  plot = p_parent,
   width = 8,
   height = 6,
   dpi = 300
 )
 
+roles_keep <- c("Target Child", "Known Adult", "Other Adult")
+
+new_data_4 <- new_data %>%
+  filter(role_category %in% roles_keep) %>%
+  mutate(
+    role_category = factor(role_category, levels = roles_keep)
+  )
+
+#plotting all adult partners (except parent)
+
+p_adult <- ggplot(
+  new_data_4,
+  aes(
+    x = target_child_age_years,
+    y = fit,
+    color = role_category,
+    fill  = role_category
+  )
+) +
+  geom_line(
+    data = subset(new_data_4, role_category == "Target Child"),
+    linewidth = 1.8
+  ) +
+  geom_line(
+    data = subset(new_data_4, role_category != "Target Child"),
+    linewidth = 1
+  ) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper),
+              alpha = 0.2, colour = NA) +
+  scale_x_continuous(
+    breaks = seq(0, 12, by = 1),
+    limits = c(age_min_y, age_max_y)
+  ) +
+  coord_cartesian(ylim = c(0, 25)) +
+  labs(
+    title = "Emotion Words of Adults by Target Child Age",
+    x = "Age (years)",
+    y = "Expected Count Per 1,000 Words"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.title = element_blank(),
+    legend.position = "bottom",
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+print(p_adult)
+
+ggsave(
+  filename = here::here("03Output", "Emotion Word Use by Adult.png"),
+  plot = p_adult,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
 #sanity check
 
 #check for overfitting

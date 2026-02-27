@@ -1,0 +1,20 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+# Large data files (>50MB, exceed GitHub limit — kept locally as R checkpoints)
+01Data/02Derived/FINAL_utt_RQ1_emotions_merged.rds
+01Data/02Derived/utt_partners_emotions_merged.rds
+01Data/02Derived/utt_partners_emotions.rds
+01Data/01Childes/ut_eng_na_utterances.rds
+01Data/02Derived/FINAL_utt_partners_emotions_merged.rds
+01Data/02Derived/utt_child_emotions.rds
+Emotion word use per utterance_RQ1
+
+# Archive folder (local only)
+Archive/
+
+# macOS metadata
+.DS_Store
+**/.DS_Store

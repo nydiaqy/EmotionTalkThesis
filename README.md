@@ -51,6 +51,34 @@ utt_partners_emotions saved as xxx
 
 counts of each emotion words in total
 
+ 
+
++--------------+------------------------------------------------------+
+| **Category​** | **Original Speaker Role in Data​**                    |
++--------------+------------------------------------------------------+
+| Target ​      | Target Child​                                         |
+|              |                                                      |
+| Child​        |                                                      |
++--------------+------------------------------------------------------+
+| Mother​       | Mother ​                                              |
++--------------+------------------------------------------------------+
+| Father​       | Father​                                               |
++--------------+------------------------------------------------------+
+| Sibling​      | Sister, Brother, Sibling​                             |
++--------------+------------------------------------------------------+
+| Known ​       | Grandmother, Grandfather, Relative, Caretaker,       |
+|              | Caregiver, Teacher​                                   |
+| Adult​        |                                                      |
++--------------+------------------------------------------------------+
+| Other ​       | Unidentified, Adult, Media, Visitor, Participant,    |
+|              | Environment, Male, Uncertain, Investigator​           |
+| Adult​        |                                                      |
++--------------+------------------------------------------------------+
+| Other ​       | Child, Friend, Playmate, Student, Girl, Teenager​     |
+|              |                                                      |
+| Child​        |                                                      |
++--------------+------------------------------------------------------+
+
 ### Problem 1. Disambiguation
 
 #### Rationale
@@ -66,7 +94,7 @@ pattern
 ### Step 1: Identifying potentially ambiguous emotion words
 
 1.  Emotion words were first ranked by overall frequency.
-2.  The **top 100 emotion words** were examined.
+2.  The **emotion words** \> 10 were examined.
 3.  For each candidate word, **20 example utterances** were manually
     inspected.
     <!--# To be considered: as part of screening, take 20 examples from all emotion words, 1. ask spacyr to tag POS, those appearing with multiple POS usage can be then manually examined 2. cross referencing with LIWC-->
@@ -89,11 +117,28 @@ contexts (e.g., as discourse markers or comparatives).
 
 </div>
 
-### Step 2: Creating a Subset of utterances containing **ambiguous** words
+### Step 2: Creating a subset of utterances containing ambiguous words
 
-A sub-dataframe was created containing only utterances that included at
-least one ambiguous emotion word. Only utterance-level identifiers and
-relevant linguistic fields were retained.
+A sub-dataframe was created containing the ambiguous words greater than
+10 times. Only utterance-level identifiers and relevant linguistic
+fields were retained. Identify ambiguous words. Words with low frequency
+(\< 100 tokens) -\> *manual coding (*higher accuracy, feasible workload)
+Words with high frequency (≥ 100 tokens) -\> *automated disambiguation
+(spaCy)*
+
+low frequency:
+
+|         |     |     |     |     |
+|:--------|----:|-----|-----|-----|
+| rotten  |  75 |     |     |     |
+| pride   |  63 |     |     |     |
+| alarm   |  60 |     |     |     |
+| ill     |  39 |     |     |     |
+| tender  |  39 |     |     |     |
+| crushed |  15 |     |     |     |
+| gloomy  |  13 |     |     |     |
+| meek    |  12 |     |     |     |
+| faint   |     |     |     |     |
 
 <div>
 
@@ -102,6 +147,8 @@ without modifying the full corpus.To improve computational efficiency
 and focus analyses on relevant cases:
 
 </div>
+
+share **identical syntactic frames**
 
 ### Step 3: Method 1 — Unsupervised NLP (exploratory)
 
@@ -175,48 +222,188 @@ modal preference questions (*would/do/can you like …*)
 All other POS categories (e.g., ADP, discourse-marker uses) were
 excluded.
 
-#### Word-level Rules 
+#### Word-level Rules
 
-+----------------+-----------------+----------------+----------------+
-| Word           | Inclusion Rules | Exclusion      | Notes          |
-|                | (1st)           | Rules (2nd)    |                |
-+================+=================+================+================+
-| Like           | POS=VERB + if   |                |                |
-|                | used as a       |                |                |
-|                | preference      |                |                |
-|                | checking        |                |                |
-|                | (would\|could   |                |                |
-|                | \|can\|do\|did) |                |                |
-+----------------+-----------------+----------------+----------------+
-| Well           | POS = ADJ + ADV | single-word    |                |
-|                | (he is doing    | utterances     |                |
-|                | well)           | (e.g. well.),  |                |
-|                |                 | se             |                |
-|                |                 | ntence-initial |                |
-|                |                 | (e.g. well     |                |
-|                |                 | this is        |                |
-|                |                 | because... )   |                |
-|                |                 | as well (e.g.  |                |
-|                |                 | I like it as   |                |
-|                |                 | well; i like a |                |
-|                |                 | as well as b)  |                |
-+----------------+-----------------+----------------+----------------+
-| Kind           | POS = ADJ       | category word  | still          |
-|                |                 | (e.g."that     | including      |
-|                |                 | kind" )        | (e.g.          |
-|                |                 |                | strawberry     |
-|                |                 |                | kind) may need |
-|                |                 |                | to explicitly  |
-|                |                 |                | exclude.       |
-+----------------+-----------------+----------------+----------------+
-|                |                 |                |                |
-+----------------+-----------------+----------------+----------------+
-|                |                 |                |                |
-+----------------+-----------------+----------------+----------------+
++---------------+---------------+---------------+---------------+
+| Word          | Inclusion     | Exclusion     | Notes         |
+|               | Rules (1st)   | Rules (2nd)   |               |
++===============+===============+===============+===============+
+| Like          | POS=VERB + if |               |               |
+|               | used as a     |               |               |
+|               | preference    |               |               |
+|               | checking      |               |               |
+|               | (             |               |               |
+|               | would\|could\ |               |               |
+|               | \|            |               |               |
+|               | can\|do\|did) |               |               |
++---------------+---------------+---------------+---------------+
+| Well          | POS = ADJ +   | single-word   |               |
+|               | ADV (he is    | utterances    |               |
+|               | doing well)   | (e.g. well.), |               |
+|               |               | se            |               |
+|               |               | n             |               |
+|               |               | tence-initial |               |
+|               |               | (e.g. well    |               |
+|               |               | this is       |               |
+|               |               | because... )  |               |
+|               |               | as well (e.g. |               |
+|               |               | I like it as  |               |
+|               |               | well; i like  |               |
+|               |               | a as well as  |               |
+|               |               | b)            |               |
++---------------+---------------+---------------+---------------+
+| Kind          | POS = ADJ     | category word | still         |
+|               |               | (e.g."that    | including     |
+|               |               | kind" )       | (e.g.         |
+|               |               |               | strawberry    |
+|               |               |               | kind) may     |
+|               |               |               | need to       |
+|               |               |               | explicitly    |
+|               |               |               | exclude.      |
++---------------+---------------+---------------+---------------+
+| fine          | next token    | stand alone/  | Descriptive   |
+|               | POS = Noun    | starting the  | adjective     |
+|               |               | sentence      | (quality /    |
+|               |               |               | aesthetic) “a |
+|               |               |               | fine lady” “a |
+|               |               |               | fine river” → |
+|               |               |               | “fine” =      |
+|               |               |               | property of   |
+|               |               |               | an            |
+|               |               |               | o             |
+|               |               |               | bject/person, |
+|               |               |               | not a         |
+|               |               |               | psychological |
+|               |               |               | state         |
+|               |               |               | Standalone /  |
+|               |               |               | turn-initial  |
+|               |               |               | “fine”        |
+|               |               |               | (discourse    |
+|               |               |               | management)   |
+|               |               |               | “fine.”       |
+|               |               |               | “fine—okay,   |
+|               |               |               | now count.”   |
++---------------+---------------+---------------+---------------+
+| High / Blue   | ?             |               |               |
++---------------+---------------+---------------+---------------+
 
-#### 
+### **Step 4: S-BERT**
 
-rules:
+POS tagging removes many non-emotion uses, but some ambiguous words
+(e.g., *blue, high, low, lost*) stay ambiguous even with the same POS
+(often adjectives). This step adds **context-sensitive disambiguation**
+so we don’t wrongly count non-emotion meanings as emotion talk. **Step
+1 - Subset utterances for the target ambiguous word**
+
+Filter the utterance-level dataframe to rows where the word appears as a
+**whole token** (e.g., \\\\bblue\\\\b).
+
+**Rationale:** Disambiguation is only needed where the ambiguous word is
+present; token matching avoids false matches (e.g., *blue* vs
+*blueberry*).
+
+**Step 2 — Define two sense prototypes (emotion vs non-emotion)**
+
+Create two “anchors” representing the competing meanings (e.g.,
+*blue-as-sad* vs *blue-as-color*).
+
+-   Prototypes can be either:
+
+    **(A) short researcher-defined reference texts**, or
+
+    **(B) a small set of clearly unambiguous CHILDES utterances** for
+    each sense.
+
+-   **Rationale:** Turns disambiguation into a semantic similarity
+    problem; CHILDES-based prototypes reduce phrasing bias and stay
+    corpus-consistent.
+
+**Step 3 — Embed utterances and prototypes using a sentence-embedding
+model**
+
+Use a pretrained **Sentence-Transformers** model (all-MiniLM-L6-v2) to
+encode each utterance and each prototype into a fixed-length vector.
+
+Rationale**:** Sentence embeddings capture **contextual meaning**,
+allowing the same surface word (e.g., “blue”) to map differently
+depending on surrounding words.
+
+**Step 4 — Compute similarity to each prototype**
+
+For each utterance, compute **cosine similarity** to the emotion
+prototype and to the non-emotion prototype.
+
+**Rationale:** Cosine similarity is standard for comparing embeddings;
+it measures semantic closeness in the shared embedding space.
+
+**Step 5 — Derive an “emotion-likeness” margin score and classify**
+
+Compute margin = sim_emotion − sim_nonemotion.
+
+Classify as **emotion-like** if margin \> 0; **non-emotion-like**
+otherwise (optionally add a neutral band around 0).
+
+**Rationale:** The margin gives an interpretable continuous score
+(strength of evidence) and a simple transparent decision rule.
+
+**Step 6 — Write results back to the dataset for downstream counting**
+
+Add sim_emotion, sim_nonemotion, margin, and predicted_sense columns to
+the utterance-level dataframe.
+
+Use predicted_sense to **retain** only emotion-like uses for
+emotion-word counts (or to exclude the word entirely if emotion-like
+uses are rare).
+
+**Rationale:** Keeps the pipeline reproducible and makes later
+auditing/threshold tuning straightforward.
+
+**Step 7 — Validation / audit (recommended)**
+
+Manually inspect a sample of utterances near the decision boundary
+(margin ≈ 0) and at both extremes.
+
+Optionally estimate agreement by hand-labeling \~50–100 cases per word.
+
+**Rationale:** Provides evidence that the automated rule aligns with
+human judgments and identifies where prototypes/thresholds need
+adjustment. rules:
+
++-----------+-----------------------+-----------+
+| Word      | Mean                  | Original  |
+|           |                       | N         |
++===========+=======================+===========+
+| High      | ```                   | 830 -\> 0 |
+|           | 0.09759036            |           |
+|           |    Min. 1st Qu.  Med  |           |
+|           | ian                   |           |
+|           |  Mean 3rd Qu.    Max. |           |
+|           | -0.4404 -0.2397 -0.1  |           |
+|           | 514 -0                |           |
+|           | .1485 -0.0687  0.1850 |           |
+|           | ```                   |           |
++-----------+-----------------------+-----------+
+| Blue      | ```                   | 4306      |
+|           | 0.091268              |           |
+|           |     Min.  1st Qu.     |           |
+|           |    Med                |           |
+|           | ian     Mean  3rd Qu. |           |
+|           | -0.43059 -0.10753     |           |
+|           |  -0.07                |           |
+|           | 978 -0.07449 -0.03754 |           |
+|           |     Max.              |           |
+|           |  0.32633              |           |
+|           | ```                   |           |
++-----------+-----------------------+-----------+
+|           |                       |           |
++-----------+-----------------------+-----------+
+
+"like","well","kind","blue","fine","merry","moved","certain","sore",
+,"rotten","pride","tender","gloomy","meek","faint"
+
+POS: "crushed" "alarm" "touched""patient""odd" "ill"
+
+"high","blue","lost","quiet", "strong","low",
 
 Now trying 30th Dec (NLP) - clustering not making sense as its based on
 utterances, not related to word-level usage
@@ -241,5 +428,13 @@ Total word count:
 Identify target words list
 
 Group conversational partner
+
+<Notes:level> of precision - actual emotion / all targeted as emotion
+
+-\> how many do we need to review to feel confident?
+
+Standard error
+
+level of precision at 90%, 95% confidence interval -\> 220 utterance
 
 ### RQ2 and RQ3 PIPELINE
