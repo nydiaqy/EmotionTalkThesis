@@ -1,14 +1,12 @@
-# EmotionTalkThesis
+# Emotion Lexicon Socialization Across Development: The Role of Conversational Partners in Children's Emotion Talk
 
-**Are children more likely to use emotion words when their conversational partner does?**
-
-This repository contains the analysis pipeline for a thesis examining emotion word use in naturalistic child-caregiver conversations, using the CHILDES English-North America corpus.
+This repository contains the analysis pipeline for a thesis examining emotion word use in naturalistic child–partner conversations, using the CHILDES English-North America corpus.
 
 ---
 
 ## Research Questions
 
-- **RQ1** — Is a conversational partner's use of emotion words associated with the target child's emotion word use? (negative binomial mixed-effects model)
+- **RQ1** — How do different conversational partners (by role) use emotion words when talking with target children of different ages? (negative binomial mixed-effects model)
 - **RQ2** — Do emotion words recur across conversational turns? (CRQA)
 - **RQ3** — Is there a directional influence in emotion word use between children and partners? (CRQA)
 
@@ -187,6 +185,6 @@ All final figures and tables are in `03Output/`:
 | `emotion word count and frequency_by role.csv` | Emotion word frequency broken down by speaker role |
 | `MERGED emotion word count and frequency.csv` | Post-disambiguation merged frequency table |
 | `Emotion Word Use.png` | Overall emotion word use plot |
-| `Emotion Word Use by Children.png` | Emotion word use — target child |
-| `Emotion Word Use by Adult.png` | Emotion word use — adult partners |
+| `Emotion Word Use by Children.png` | Emotion word use — child social partners (siblings and other children) |
+| `Emotion Word Use by Adult.png` | Emotion word use — non-parent adult partners (excludes Mother and Father) |
 | `fig_role_distribution.png` | Distribution of speaker roles across transcripts |
