@@ -1,0 +1,571 @@
+---
+title: "10 – Additional Analysis: Partner Emotion Word Use as Predictor of Child Emotion Word Use"
+format: html
+editor: visual
+---
+
+# Overview
+
+**Research question** — If social partners talk more about emotion, do children talk more about emotion too? And does this association change across development?
+
+This analysis operates at the **transcript level** (one observation per transcript), complementing the turn-by-turn CRQA approach in script 09.
+
+Two sections are reported:
+
+**Part 1 — Full sample**: All transcripts retained. All non-child speakers collapsed into one "partner" category. Tests the overall partner → child association and its developmental moderation and mediation.
+
+**Part 2 — Partner-type comparison**: Restricted to transcripts where the child speaks to exactly one partner type. Tests whether the partner → child association differs by who the child is talking to (Mother, Father, Sibling, etc.).
+
+------------------------------------------------------------------------
+
+## 0. Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+source(here::here("00_setup.R"))
+library(lme4)
+library(lmerTest)
+library(splines)
+library(emmeans)
+library(mediation)
+library(broom.mixed)
+library(ggeffects)
+```
+
+------------------------------------------------------------------------
+
+## 1. Load data
+
+```{r load}
+utt <- readRDS(here("01Data", "02Derived", "FINAL_utt_RQ1_emotions_merged.rds"))
+
+cat("Rows:        ", nrow(utt), "\n")
+cat("Transcripts: ", n_distinct(utt$transcript_id), "\n")
+cat("Children:    ", n_distinct(utt$target_child_id), "\n")
+```
+
+------------------------------------------------------------------------
+
+## 2. Build transcript-level age lookup
+
+`target_child_age` is only populated on child-speaker rows in CHILDES. Build a reliable transcript-level lookup from child utterances only.
+
+```{r age-lookup}
+age_lookup <- utt %>%
+  filter(role_category == "Target Child", !is.na(target_child_age)) %>%
+  group_by(transcript_id) %>%
+  summarise(
+    target_child_age = first(target_child_age),
+    target_child_sex = first(target_child_sex),
+    target_child_id  = first(target_child_id),
+    .groups = "drop"
+  )
+```
+
+------------------------------------------------------------------------
+
+# PART 1 — Full Sample (all partner types collapsed)
+
+------------------------------------------------------------------------
+
+## 3. Aggregate all transcripts — partner as single category
+
+All non-child utterances are summed into one "partner" series per transcript, regardless of who is speaking.
+
+```{r part1-aggregate}
+speaker_summary_all <- utt %>%
+  mutate(speaker_category = if_else(role_category == "Target Child",
+                                    "child", "partner")) %>%
+  group_by(transcript_id, speaker_category) %>%
+  summarise(
+    total_tokens  = sum(num_tokens,    na.rm = TRUE),
+    total_emotion = sum(emotion_count, na.rm = TRUE),
+    n_utterances  = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(emo_rate = if_else(total_tokens > 0,
+                             total_emotion / total_tokens, NA_real_))
+
+transcript_all <- speaker_summary_all %>%
+  pivot_wider(
+    id_cols     = transcript_id,
+    names_from  = speaker_category,
+    values_from = c(emo_rate, total_tokens, total_emotion, n_utterances)
+  ) %>%
+  rename(
+    child_emo_rate   = emo_rate_child,
+    partner_emo_rate = emo_rate_partner,
+    child_tokens     = total_tokens_child,
+    partner_tokens   = total_tokens_partner,
+    child_emotion    = total_emotion_child,
+    partner_emotion  = total_emotion_partner,
+    child_utts       = n_utterances_child,
+    partner_utts     = n_utterances_partner
+  ) %>%
+  left_join(age_lookup, by = "transcript_id") %>%
+  mutate(target_child_age_yrs = target_child_age / 12) %>%
+  filter(
+    !is.na(child_emo_rate),
+    !is.na(partner_emo_rate),
+    !is.na(target_child_age_yrs),
+    child_tokens   >= 10,
+    partner_tokens >= 10
+  )
+
+cat("Transcripts (full sample):", nrow(transcript_all), "\n")
+cat("Children:                 ", n_distinct(transcript_all$target_child_id), "\n")
+cat("Age range:                ", round(min(transcript_all$target_child_age_yrs), 2),
+    "–", round(max(transcript_all$target_child_age_yrs), 2), "years\n")
+```
+
+------------------------------------------------------------------------
+
+## 4. Descriptives — full sample
+
+```{r part1-desc}
+transcript_all %>%
+  summarise(
+    n_transcripts    = n(),
+    n_children       = n_distinct(target_child_id),
+    age_min          = round(min(target_child_age_yrs),  2),
+    age_max          = round(max(target_child_age_yrs),  2),
+    child_emo_mean   = round(mean(child_emo_rate),       4),
+    child_emo_sd     = round(sd(child_emo_rate),         4),
+    partner_emo_mean = round(mean(partner_emo_rate),     4),
+    partner_emo_sd   = round(sd(partner_emo_rate),       4)
+  ) %>% print()
+
+cor.test(transcript_all$child_emo_rate, transcript_all$partner_emo_rate)
+```
+
+------------------------------------------------------------------------
+
+## 5. Within-child / between-child decomposition
+
+```{r part1-decompose}
+transcript_all <- transcript_all %>%
+  group_by(target_child_id) %>%
+  mutate(
+    partner_emo_between = mean(partner_emo_rate, na.rm = TRUE),
+    partner_emo_within  = partner_emo_rate - partner_emo_between
+  ) %>%
+  ungroup()
+```
+
+------------------------------------------------------------------------
+
+## 6. Moderation — does age moderate the partner → child association?
+
+### 6a. Fit model
+
+```{r part1-mod-model}
+m_mod <- lmer(
+  child_emo_rate ~
+    partner_emo_within  * ns(target_child_age_yrs, df = 3) +
+    partner_emo_between * ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 + partner_emo_within | target_child_id),
+  data    = transcript_all,
+  REML    = TRUE,
+  control = lmerControl(optimizer = "bobyqa")
+)
+
+summary(m_mod)
+```
+
+### 6b. Test within × age interaction
+
+```{r part1-mod-anova}
+m_mod_noint <- lmer(
+  child_emo_rate ~
+    partner_emo_within +
+    partner_emo_between * ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 + partner_emo_within | target_child_id),
+  data    = transcript_all,
+  REML    = FALSE,
+  control = lmerControl(optimizer = "bobyqa")
+)
+
+anova(m_mod_noint, update(m_mod, REML = FALSE))
+```
+
+### 6c. Simple slopes — partner effect at each age
+
+```{r part1-simple-slopes}
+emtrends(m_mod,
+         var   = "partner_emo_within",
+         specs = ~ target_child_age_yrs,
+         at    = list(target_child_age_yrs = c(2, 4, 6, 8, 10)))
+```
+
+### 6d. Moderation plot
+
+```{r part1-mod-plot}
+pred_mod <- ggpredict(
+  m_mod,
+  terms = c("partner_emo_within [all]", "target_child_age_yrs [2, 4, 6, 8, 10]")
+)
+
+ggplot(pred_mod, aes(x = x, y = predicted,
+                     colour = group, fill = group)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high),
+              alpha = 0.15, colour = NA) +
+  geom_line(linewidth = 0.9) +
+  labs(
+    title    = "Partner → child emotion rate by child age (full sample)",
+    subtitle = "Within-child effect  |  marginalised over sex and between-child rate",
+    x        = "Partner emotion rate (within-child deviation)",
+    y        = "Predicted child emotion rate",
+    colour   = "Child age (years)", fill = "Child age (years)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top")
+```
+
+------------------------------------------------------------------------
+
+## 7. Mediation — does partner rate explain the age effect on child rate?
+
+**Causal chain**: Age → partner_emo_rate → child_emo_rate
+
+### 7a. Path a: age → partner rate
+
+```{r part1-path-a}
+m_med_a <- lmer(
+  partner_emo_rate ~
+    ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 | target_child_id),
+  data = transcript_all,
+  REML = TRUE
+)
+summary(m_med_a)
+```
+
+### 7b. Path b: partner rate → child rate (controlling age)
+
+```{r part1-path-b}
+m_med_b <- lmer(
+  child_emo_rate ~
+    partner_emo_rate +
+    ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 | target_child_id),
+  data = transcript_all,
+  REML = TRUE
+)
+summary(m_med_b)
+```
+
+### 7c. Bootstrap indirect effect
+
+```{r part1-mediation}
+med_data <- transcript_all %>%
+  filter(!is.na(target_child_age_yrs), !is.na(partner_emo_rate),
+         !is.na(child_emo_rate), !is.na(target_child_sex))
+
+m_med_a_lm <- lm(partner_emo_rate ~ target_child_age_yrs + target_child_sex,
+                  data = med_data)
+
+m_med_b_lm <- lm(child_emo_rate ~ partner_emo_rate + target_child_age_yrs +
+                    target_child_sex, data = med_data)
+
+set.seed(42)
+med_out <- mediate(
+  model.m  = m_med_a_lm,
+  model.y  = m_med_b_lm,
+  treat    = "target_child_age_yrs",
+  mediator = "partner_emo_rate",
+  boot     = TRUE,
+  sims     = 1000
+)
+
+summary(med_out)
+plot(med_out)
+```
+
+------------------------------------------------------------------------
+
+## 8. Visualise child and partner rates across age — full sample
+
+```{r part1-age-plot}
+rates_by_age <- transcript_all %>%
+  mutate(age_block = floor(target_child_age_yrs)) %>%
+  filter(age_block <= 11) %>%
+  group_by(age_block) %>%
+  summarise(
+    n            = n(),
+    child_mean   = mean(child_emo_rate,   na.rm = TRUE),
+    child_se     = sd(child_emo_rate,     na.rm = TRUE) / sqrt(n()),
+    partner_mean = mean(partner_emo_rate, na.rm = TRUE),
+    partner_se   = sd(partner_emo_rate,   na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(c(child_mean, partner_mean),
+               names_to = "speaker", values_to = "emo_rate") %>%
+  mutate(
+    se      = if_else(speaker == "child_mean", child_se, partner_se),
+    speaker = if_else(speaker == "child_mean", "Child", "Partner")
+  )
+
+ggplot(rates_by_age, aes(x = age_block, y = emo_rate,
+                          colour = speaker, fill = speaker)) +
+  geom_ribbon(aes(ymin = emo_rate - se, ymax = emo_rate + se),
+              alpha = 0.2, colour = NA) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = 0:11) +
+  labs(
+    title    = "Child and partner emotion word rate across development (full sample)",
+    subtitle = "Mean ± SE per 1-year age block",
+    x = "Child age (years)", y = "Emotion word rate (count / tokens)",
+    colour = NULL, fill = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top")
+```
+
+------------------------------------------------------------------------
+
+# PART 2 — Partner-type comparison (dyadic transcripts only)
+
+Only transcripts where the target child speaks to exactly **one** partner type are retained so that each transcript has an unambiguous partner category label.
+
+------------------------------------------------------------------------
+
+## 9. Filter to dyadic transcripts
+
+```{r part2-dyadic}
+dyadic_info <- utt %>%
+  filter(role_category != "Target Child") %>%
+  group_by(transcript_id) %>%
+  summarise(
+    n_partner_types = n_distinct(role_category),
+    partner_type    = if_else(n_distinct(role_category) == 1,
+                              first(role_category), NA_character_),
+    .groups = "drop"
+  )
+
+dyadic_ids <- dyadic_info %>% filter(n_partner_types == 1)
+
+cat("Total transcripts:            ", n_distinct(utt$transcript_id), "\n")
+cat("Dyadic (1 partner type):      ", nrow(dyadic_ids), "\n")
+cat("Excluded (multiple partners): ",
+    n_distinct(utt$transcript_id) - nrow(dyadic_ids), "\n\n")
+
+cat("Transcripts per partner category:\n")
+dyadic_ids %>% count(partner_type, name = "n") %>% arrange(desc(n)) %>% print()
+```
+
+------------------------------------------------------------------------
+
+## 10. Aggregate dyadic transcripts
+
+```{r part2-aggregate}
+utt_dyadic <- utt %>%
+  filter(transcript_id %in% dyadic_ids$transcript_id) %>%
+  left_join(dyadic_ids %>% dplyr::select(transcript_id, partner_type),
+            by = "transcript_id")
+
+speaker_summary_dyadic <- utt_dyadic %>%
+  mutate(speaker_category = if_else(role_category == "Target Child",
+                                    "child", "partner")) %>%
+  group_by(transcript_id, speaker_category) %>%
+  summarise(
+    partner_type  = first(partner_type),
+    total_tokens  = sum(num_tokens,    na.rm = TRUE),
+    total_emotion = sum(emotion_count, na.rm = TRUE),
+    n_utterances  = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(emo_rate = if_else(total_tokens > 0,
+                             total_emotion / total_tokens, NA_real_))
+
+transcript_dyadic <- speaker_summary_dyadic %>%
+  pivot_wider(
+    id_cols     = c(transcript_id, partner_type),
+    names_from  = speaker_category,
+    values_from = c(emo_rate, total_tokens, total_emotion, n_utterances)
+  ) %>%
+  rename(
+    child_emo_rate   = emo_rate_child,
+    partner_emo_rate = emo_rate_partner,
+    child_tokens     = total_tokens_child,
+    partner_tokens   = total_tokens_partner,
+    child_emotion    = total_emotion_child,
+    partner_emotion  = total_emotion_partner,
+    child_utts       = n_utterances_child,
+    partner_utts     = n_utterances_partner
+  ) %>%
+  left_join(age_lookup, by = "transcript_id") %>%
+  mutate(target_child_age_yrs = target_child_age / 12) %>%
+  filter(
+    !is.na(child_emo_rate),
+    !is.na(partner_emo_rate),
+    !is.na(target_child_age_yrs),
+    child_tokens   >= 10,
+    partner_tokens >= 10
+  ) %>%
+  mutate(
+    partner_type = factor(partner_type),
+    partner_type = relevel(partner_type, ref = "Mother")
+  )
+
+# Drop partner types with fewer than 20 transcripts
+keep_types <- transcript_dyadic %>%
+  count(partner_type) %>%
+  filter(n >= 20) %>%
+  pull(partner_type)
+
+transcript_dyadic <- transcript_dyadic %>% filter(partner_type %in% keep_types)
+
+# Within / between decomposition
+transcript_dyadic <- transcript_dyadic %>%
+  group_by(target_child_id) %>%
+  mutate(
+    partner_emo_between = mean(partner_emo_rate, na.rm = TRUE),
+    partner_emo_within  = partner_emo_rate - partner_emo_between
+  ) %>%
+  ungroup()
+
+cat("Dyadic transcripts retained:", nrow(transcript_dyadic), "\n")
+cat("Children:                   ", n_distinct(transcript_dyadic$target_child_id), "\n")
+cat("\nFinal n per partner type:\n")
+print(count(transcript_dyadic, partner_type))
+```
+
+------------------------------------------------------------------------
+
+## 11. Descriptives by partner type
+
+```{r part2-desc}
+transcript_dyadic %>%
+  group_by(partner_type) %>%
+  summarise(
+    n                = n(),
+    age_mean         = round(mean(target_child_age_yrs), 2),
+    child_emo_mean   = round(mean(child_emo_rate,   na.rm = TRUE), 4),
+    child_emo_sd     = round(sd(child_emo_rate,     na.rm = TRUE), 4),
+    partner_emo_mean = round(mean(partner_emo_rate, na.rm = TRUE), 4),
+    partner_emo_sd   = round(sd(partner_emo_rate,   na.rm = TRUE), 4),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(n)) %>%
+  print()
+```
+
+------------------------------------------------------------------------
+
+## 12. Does child emotion rate differ by partner type?
+
+```{r part2-level-model}
+m_partner_level <- lmer(
+  child_emo_rate ~
+    partner_type +
+    ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 | target_child_id),
+  data    = transcript_dyadic,
+  REML    = TRUE,
+  control = lmerControl(optimizer = "bobyqa")
+)
+
+summary(m_partner_level)
+
+# Estimated marginal means
+emm_partner <- emmeans(m_partner_level, ~ partner_type) %>% as_tibble()
+
+ggplot(emm_partner,
+       aes(x = reorder(partner_type, emmean), y = emmean,
+           colour = partner_type)) +
+  geom_hline(yintercept = mean(emm_partner$emmean),
+             linetype = "dashed", colour = "grey50") +
+  geom_pointrange(aes(ymin = lower.CL, ymax = upper.CL),
+                  linewidth = 0.8, fatten = 3) +
+  coord_flip() +
+  labs(
+    title    = "Child emotion word rate by partner type",
+    subtitle = "Model-estimated marginal means  |  adjusted for age and sex  |  95% CI\nDashed = grand mean",
+    x = NULL, y = "Predicted child emotion rate"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "none")
+```
+
+------------------------------------------------------------------------
+
+## 13. Does the partner → child responsiveness differ by partner type?
+
+```{r part2-slope-model}
+m_partner_slope <- lmer(
+  child_emo_rate ~
+    partner_emo_within * partner_type +
+    partner_emo_between +
+    ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 + partner_emo_within | target_child_id),
+  data    = transcript_dyadic,
+  REML    = TRUE,
+  control = lmerControl(optimizer = "bobyqa")
+)
+
+summary(m_partner_slope)
+
+# Model comparison — does the interaction improve fit?
+m_partner_slope_noint <- lmer(
+  child_emo_rate ~
+    partner_emo_within + partner_type +
+    partner_emo_between +
+    ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 + partner_emo_within | target_child_id),
+  data    = transcript_dyadic,
+  REML    = FALSE,
+  control = lmerControl(optimizer = "bobyqa")
+)
+
+anova(m_partner_slope_noint, update(m_partner_slope, REML = FALSE))
+```
+
+------------------------------------------------------------------------
+
+## 14. Partner → child slopes per partner type
+
+```{r part2-slopes}
+slope_est <- emtrends(m_partner_slope,
+                      var   = "partner_emo_within",
+                      specs = ~ partner_type) %>%
+  as_tibble() %>%
+  arrange(desc(partner_emo_within.trend)) %>%
+  mutate(sig = if_else(lower.CL > 0 | upper.CL < 0, "sig", "n.s."))
+
+print(slope_est)
+
+ggplot(slope_est,
+       aes(x = reorder(partner_type, partner_emo_within.trend),
+           y = partner_emo_within.trend, colour = sig)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_pointrange(aes(ymin = lower.CL, ymax = upper.CL),
+                  linewidth = 0.8, fatten = 3) +
+  scale_colour_manual(values = c("sig" = "#c0392b", "n.s." = "grey60")) +
+  coord_flip() +
+  labs(
+    title    = "Partner → child emotion word slope by partner type",
+    subtitle = "Within-child effect  |  95% CI  |  red = CI excludes zero",
+    x = NULL, y = "Slope (partner_emo_within → child_emo_rate)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "none")
+```
+
+------------------------------------------------------------------------
+
+## 15. Save
+
+```{r save}
+saveRDS(transcript_all,     here("01Data", "02Derived", "additional_full_sample.rds"))
+saveRDS(transcript_dyadic,  here("01Data", "02Derived", "additional_dyadic.rds"))
+saveRDS(m_mod,              here("01Data", "02Derived", "additional_mod_model.rds"))
+saveRDS(m_partner_level,    here("01Data", "02Derived", "additional_partner_level_model.rds"))
+saveRDS(m_partner_slope,    here("01Data", "02Derived", "additional_partner_slope_model.rds"))
+```

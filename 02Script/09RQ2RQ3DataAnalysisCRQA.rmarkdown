@@ -1,0 +1,1089 @@
+---
+title: "09 – RQ2 & RQ3: Windowed Cross-Recurrence Analysis"
+format: html
+editor: visual
+---
+
+# Overview
+
+**RQ2** – Do emotion words co-occur across conversational turns (child ↔ partner)? **RQ3** – Is there a directional influence in emotion word use between child and partner?
+
+**Method: Windowed Cross-Recurrence Rate (wRR)**
+
+We build a cross-recurrence plot (CRP) for each transcript — an N×N binary matrix where cell (i, j) = 1 if child's i-th turn and partner's j-th turn both contain ≥1 emotion word, and 0 otherwise. Only (1,1) entries are marked as recurrent: matching zeros (both speakers silent) carry no information about emotional coupling.
+
+We restrict attention to a **diagonal band** of width ±W around the main diagonal (all cells where \|i−j\| ≤ W). This band captures lagged co-occurrence up to W turns away, while excluding distant, temporally irrelevant pairings.
+
+**Windowed Recurrence Rate (wRR)** = recurrent points in band / total cells in band.
+
+**Directionality** — above vs. below the diagonal carries directional meaning:
+
+-   lag L = j − i \> 0 (above diagonal): child uses emotion at turn i, partner at later turn j → **child leads**
+-   lag L = j − i \<= 0 (below diagonal): partner speaks first → **partner leads**
+
+Asymmetry index = RR at positive lags − RR at negative lags (positive = child leads).
+
+**Window size W** is chosen from the data's own inter-event interval (IEI) distribution (see Section 5).
+
+------------------------------------------------------------------------
+
+## 0. Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+source(here::here("00_setup.R"))
+library(lme4)
+library(splines)
+library(emmeans)
+library(broom.mixed)
+library(ggeffects)
+library(ggeffects)
+library(dplyr)
+```
+
+------------------------------------------------------------------------
+
+## 1. Load data
+
+```{r load-data}
+utt <- readRDS(here("01Data", "02Derived", "FINAL_utt_RQ1_emotions_merged.rds"))
+
+cat("Rows:", nrow(utt), "\n")
+cat("Transcripts:", n_distinct(utt$transcript_id), "\n")
+cat("Children:", n_distinct(utt$target_child_id), "\n")
+```
+
+------------------------------------------------------------------------
+
+## 2. Select relevant columns
+
+```{r select-cols}
+crqa_all <- utt %>%
+  dplyr::select(
+    id,
+    target_child_id,
+    transcript_id,
+    role_category,
+    target_child_age,
+    target_child_sex,
+    emotion_count
+  )
+saveRDS(crqa_all, here("01Data", "02Derived", "CRQA Roles Sep.rds"))
+```
+
+------------------------------------------------------------------------
+
+## 3. Aggregate utterances → turns
+
+```{r build-turns}
+crqa_turns <- crqa_all %>%
+  group_by(transcript_id) %>%
+  arrange(id, .by_group = TRUE) %>%
+  mutate(
+    speaker_category = if_else(role_category == "Target Child", "child", "partner"),
+    turn_change = speaker_category != lag(speaker_category,
+                                          default = first(speaker_category)),
+    turn_id = cumsum(turn_change) + 1L
+  ) %>%
+  group_by(transcript_id, turn_id) %>%
+  summarise(
+    target_child_id  = first(target_child_id),
+    target_child_age = first(target_child_age),
+    target_child_sex = first(target_child_sex),
+    speaker_category = first(speaker_category),
+    emotion_count    = sum(emotion_count, na.rm = TRUE),
+    n_utts           = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(transcript_id, turn_id)
+```
+
+------------------------------------------------------------------------
+
+## 3b. Enforce partner-first alignment
+
+```{r partner-first}
+crqa_turns_pf <- crqa_turns %>%
+  group_by(transcript_id) %>%
+  arrange(turn_id, .by_group = TRUE) %>%
+  filter(turn_id >= min(turn_id[speaker_category == "partner"])) %>%
+  ungroup()
+
+cat("Turns dropped:", nrow(crqa_turns) - nrow(crqa_turns_pf), "\n")
+```
+
+------------------------------------------------------------------------
+
+## 4. Build separate binary series per speaker
+
+```{r build-series}
+crqa_series <- crqa_turns_pf %>%
+  mutate(has_emotion = as.integer(emotion_count > 0)) %>%
+  group_by(transcript_id) %>%
+  summarise(
+    target_child_id  = first(target_child_id),
+    target_child_age = first(target_child_age),
+    target_child_sex = first(target_child_sex),
+    child_series     = list(has_emotion[speaker_category == "child"]),
+    partner_series   = list(has_emotion[speaker_category == "partner"]),
+    n_child_turns    = sum(speaker_category == "child"),
+    n_partner_turns  = sum(speaker_category == "partner"),
+    child_emo_rate   = mean(has_emotion[speaker_category == "child"]),
+    partner_emo_rate = mean(has_emotion[speaker_category == "partner"]),
+    .groups = "drop"
+  ) %>%
+  mutate(n_aligned = pmin(n_child_turns, n_partner_turns))
+
+saveRDS(crqa_series, here("01Data", "02Derived", "CRQA full data.rds"))
+```
+
+------------------------------------------------------------------------
+
+## 5. Choose window size W from inter-event intervals
+
+Because emotion words are rare, the window W should reflect the typical spacing *between* emotional expressions — not the duration of an emotion episode. If coupling exists, a partner's responsive emotion word should arrive within the next inter-event interval of the child's signal (and vice versa). Setting W to the median IEI ensures the diagonal band is wide enough to capture most genuine coupled pairs, without extending so far that random co-occurrence dominates.
+
+An inter-event interval (IEI) is the gap in turns between two consecutive emotion words in the same series.
+
+```{r choose-window}
+compute_iei <- function(series) {
+  positions <- which(series == 1L)
+  if (length(positions) < 2) return(integer(0))
+  diff(positions)
+}
+
+all_iei <- crqa_series %>%
+  pmap(function(child_series, partner_series, ...) {
+    c(compute_iei(unlist(child_series)),
+      compute_iei(unlist(partner_series)))
+  }) %>%
+  unlist()
+
+iei_summary <- tibble(
+  mean   = mean(all_iei),
+  median = median(all_iei),
+  sd     = sd(all_iei),
+  p25    = quantile(all_iei, 0.25),
+  p75    = quantile(all_iei, 0.75)
+)
+
+cat("Inter-event interval (turns between consecutive emotion words):\n")
+print(round(iei_summary, 2))
+
+# W = ceiling of median IEI
+WINDOW_W <- ceiling(median(all_iei))
+cat(sprintf("\nChosen window W: %d turns\n", WINDOW_W))
+
+ggplot(tibble(iei = all_iei), aes(x = iei)) +
+  geom_histogram(bins = 50, fill = "steelblue", colour = "white") +
+  geom_vline(xintercept = WINDOW_W, colour = "red",
+             linetype = "dashed", linewidth = 0.8) +
+  annotate("text", x = WINDOW_W + 0.5, y = Inf, vjust = 1.5, hjust = 0,
+           label = paste0("W = ", WINDOW_W), colour = "red", size = 3.5) +
+  coord_cartesian(xlim = c(0, quantile(all_iei, 0.95))) +
+  labs(
+    title    = "Distribution of inter-event intervals (emotion words)",
+    subtitle = "Red line = chosen window W (ceiling of median IEI)",
+    x = "Turns between consecutive emotion words", y = "Count"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+------------------------------------------------------------------------
+
+## 6. Filter transcripts
+
+Retain only transcripts where the aligned series length exceeds W — the minimum needed for the diagonal band to contain any cells.
+
+```{r filter}
+crqa_series_f <- crqa_series %>% filter(n_aligned > WINDOW_W)
+
+cat(sprintf("Retained: %d  |  Excluded: %d\n",
+            nrow(crqa_series_f),
+            nrow(crqa_series) - nrow(crqa_series_f)))
+
+#get final demo data for RQ2a 3a
+
+crqa_series_f %>%
+  distinct(target_child_id, target_child_sex) %>%
+  count(target_child_sex)
+
+crqa_series_f %>%
+  summarise(
+    n_transcripts = n_distinct(transcript_id),
+    n_children    = n_distinct(target_child_id)
+  )%>%
+  
+ crqa_series_f %>%
+  summarise(
+    min_age_months = min(target_child_age, na.rm = TRUE),
+    max_age_months = max(target_child_age, na.rm = TRUE),
+    min_age_years  = min(target_child_age, na.rm = TRUE) / 12,
+    max_age_years  = max(target_child_age, na.rm = TRUE) / 12
+  )
+```
+
+------------------------------------------------------------------------
+
+## 7. Cross-recurrence functions
+
+We never build the full N×N matrix. Instead, we iterate over lags L from −W to +W and compute co-occurrence directly at each lag — equivalent to reading off each diagonal of the recurrence plot.
+
+At lag L = j − i: - L ≥ 0: child\[1:(N−L)\] vs partner\[(L+1):N\] - L \< 0: child\[(\|L\|+1):N\] vs partner\[1:(N−\|L\|)\]
+
+```{r crqa-functions}
+# Co-occurrence count and cell count at a single lag
+co_at_lag <- function(cs, ps, L) {
+  N <- length(cs)
+  if (L >= 0) {
+    n_pairs <- N - L
+    if (n_pairs <= 0) return(c(co = 0L, n = 0L))
+    co <- sum(cs[1:n_pairs] == 1L & ps[(L + 1):N] == 1L)
+  } else {
+    aL      <- abs(L)
+    n_pairs <- N - aL
+    if (n_pairs <= 0) return(c(co = 0L, n = 0L))
+    co <- sum(cs[(aL + 1):N] == 1L & ps[1:n_pairs] == 1L)
+  }
+  c(co = co, n = n_pairs)
+}
+
+# Full diagonal-band recurrence profile for lags -W..+W
+recurrence_profile <- function(cs, ps, W) {
+  N   <- min(length(cs), length(ps))
+  cs  <- cs[1:N]; ps <- ps[1:N]
+  lags <- seq(-W, W)
+  map_dfr(lags, function(L) {
+    r <- co_at_lag(cs, ps, L)
+    tibble(lag = L, co = r["co"], n_cells = r["n"])
+  })
+}
+
+# Summary metrics from profile
+summarise_crqa <- function(profile) {
+  # wRR: total recurrences in band / total cells in band
+  wRR <- sum(profile$co) / sum(profile$n_cells)
+
+  # Directionality: above diagonal = child leads (lag > 0)
+  #                 at or below diagonal = partner leads (lag <= 0)
+  # lag = 0 is partner-leading because partner always speaks first
+  # within each aligned turn-pair (partner-first convention)
+  pos <- profile %>% filter(lag > 0)
+  neg <- profile %>% filter(lag <= 0)
+  RR_pos <- sum(pos$co) / sum(pos$n_cells)
+  RR_neg <- sum(neg$co) / sum(neg$n_cells)
+
+  tibble(
+    wRR        = wRR,
+    RR_pos     = RR_pos,       # child leads
+    RR_neg     = RR_neg,       # partner leads (includes lag 0)
+    asymmetry  = RR_pos - RR_neg   # + = child leads, − = partner leads
+  )
+}
+```
+
+------------------------------------------------------------------------
+
+## 8. Compute observed wRR and asymmetry
+
+```{r compute-observed}
+crqa_results <- map_dfr(seq_len(nrow(crqa_series_f)), function(i) {
+  cs <- unlist(crqa_series_f$child_series[[i]])
+  ps <- unlist(crqa_series_f$partner_series[[i]])
+  na <- crqa_series_f$n_aligned[i]
+
+  prof <- recurrence_profile(cs[1:na], ps[1:na], W = WINDOW_W)
+  summarise_crqa(prof) %>%
+    mutate(
+      transcript_id    = crqa_series_f$transcript_id[i],
+      target_child_id  = crqa_series_f$target_child_id[i],
+      target_child_age = crqa_series_f$target_child_age[i],
+      target_child_sex = crqa_series_f$target_child_sex[i]
+    )
+})
+
+cat("Observed wRR — mean:", round(mean(crqa_results$wRR), 5), "\n")
+cat("Mean asymmetry:     ", round(mean(crqa_results$asymmetry), 5),
+    "(+ = child leads)\n")
+```
+
+------------------------------------------------------------------------
+
+## 9. Shuffled baseline
+
+Shuffle the child series to destroy temporal order while preserving its emission rate. Any remaining recurrence is due purely to base rates (both speakers happen to use emotion words at similar rates), not coupling. Subtracting this baseline removes the base-rate contribution from both wRR and asymmetry.
+
+```{r shuffled-baseline}
+set.seed(42)
+
+crqa_shuffled <- map_dfr(seq_len(nrow(crqa_series_f)), function(i) {
+  cs_shuf <- sample(unlist(crqa_series_f$child_series[[i]]))
+  ps      <- unlist(crqa_series_f$partner_series[[i]])
+  na      <- crqa_series_f$n_aligned[i]
+
+  prof <- recurrence_profile(cs_shuf[1:na], ps[1:na], W = WINDOW_W)
+  summarise_crqa(prof) %>%
+    rename(wRR_shuf = wRR, RR_pos_shuf = RR_pos,
+           RR_neg_shuf = RR_neg, asymmetry_shuf = asymmetry) %>%
+    mutate(transcript_id = crqa_series_f$transcript_id[i])
+})
+
+# age_lookup built here for use in both the full-sample and dyadic pipelines
+age_lookup <- utt %>%
+  filter(role_category == "Target Child", !is.na(target_child_age)) %>%
+  group_by(transcript_id) %>%
+  summarise(
+    target_child_age = first(target_child_age),
+    target_child_sex = first(target_child_sex),
+    target_child_id  = first(target_child_id),
+    .groups = "drop"
+  )
+
+crqa_data <- crqa_results %>%
+  left_join(crqa_shuffled, by = "transcript_id") %>%
+  dplyr::select(-target_child_age, -target_child_sex, -target_child_id) %>%
+  left_join(age_lookup, by = "transcript_id") %>%
+  mutate(
+    wRR_excess           = wRR - wRR_shuf,
+    asymmetry_corrected  = (RR_pos - RR_pos_shuf) - (RR_neg - RR_neg_shuf),
+    target_child_age_yrs = target_child_age / 12
+  )
+
+cat("Mean wRR (observed):       ", round(mean(crqa_data$wRR),        5), "\n")
+cat("Mean wRR (shuffled):       ", round(mean(crqa_data$wRR_shuf),   5), "\n")
+cat("Mean wRR excess:           ", round(mean(crqa_data$wRR_excess), 5), "\n")
+cat("Mean corrected asymmetry:  ", round(mean(crqa_data$asymmetry_corrected), 5),
+    "(+ = child leads)\n")
+```
+
+------------------------------------------------------------------------
+
+## 10. RQ2 — Is observed co-occurrence greater than chance?
+
+### 10a. Paired test
+
+```{r rq2-test}
+t.test(crqa_data$wRR, crqa_data$wRR_shuf,
+       paired = TRUE, alternative = "greater")
+```
+
+### 10b. Does coupling vary with child age?
+
+```{r rq2-model}
+m_rq2 <- lmer(
+  wRR_excess ~
+    ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 | target_child_id),
+  data    = crqa_data,
+  REML    = TRUE
+)
+summary(m_rq2)
+```
+
+### 10c. Distribution plot
+
+```{r rq2-dist-plot}
+ggplot(crqa_data, aes(x = wRR)) +
+  geom_histogram(bins = 40, fill = "steelblue", colour = "white") +
+  geom_vline(xintercept = mean(crqa_data$wRR_shuf, na.rm = TRUE),
+             colour = "red", linetype = "dashed", linewidth = 0.8) +
+  annotate("text",
+           x = mean(crqa_data$wRR_shuf, na.rm = TRUE) + 0.0002,
+           y = Inf, vjust = 1.5, hjust = 0,
+           label = "shuffled mean", colour = "red", size = 3.5) +
+  labs(
+    title    = "Distribution of windowed recurrence rate (wRR)",
+    subtitle = paste0("Diagonal band ±", WINDOW_W, " turns  |  (1,1) recurrences only"),
+    x = "wRR per transcript", y = "Count"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+### 10d. Coupling by child age
+
+```{r rq2-age-plot}
+crqa_data_long <- crqa_data %>%
+  dplyr::select(target_child_age_yrs, wRR, wRR_shuf) %>%
+  pivot_longer(cols = c(wRR, wRR_shuf),
+               names_to  = "condition",
+               values_to = "value") %>%
+  mutate(condition = if_else(condition == "wRR", "Observed", "Shuffled"))
+
+library(dplyr)
+library(ggplot2)
+
+ggplot(crqa_data_long, aes(x = target_child_age_yrs, y = value, 
+                           colour = condition, fill = condition,
+                           linetype = condition)) +
+  # GAM smooths - thicker lines for slide visibility
+  geom_smooth(method = "gam", formula = y ~ s(x, k = 4), alpha = 0.2, linewidth = 1.5) +
+  # Numeric Y-axis
+  scale_y_continuous() +
+  # Define line types: Observed is solid, Shuffled is dotted
+  scale_linetype_manual(values = c("Observed" = "solid", "Shuffled" = "dotted")) +
+  # Define colors: Observed is blue, Shuffled is grey
+  scale_colour_manual(values = c("Observed" = "#2980b9", "Shuffled" = "grey60")) +
+  scale_fill_manual(values = c("Observed" = "#2980b9", "Shuffled" = "grey60")) +
+  labs(
+    title  = "Emotion Word Recurrence by Child Age",
+    x      = "Child Age (Years)", 
+    y      = "Windowed Recurrence Rate",
+    colour = NULL, fill = NULL, linetype = NULL
+  ) +
+  theme_minimal(base_size = 18) +
+  theme(
+    legend.position = "top",
+    plot.title = element_text(face = "bold"),
+    plot.caption = element_text(hjust = 0, size = 14, face = "italic"),
+    panel.grid.minor = element_blank()
+  )
+```
+
+------------------------------------------------------------------------
+
+## 11. RQ3 — Directional asymmetry
+
+### 11a. Is there a directional bias?
+
+```{r rq3-test}
+t.test(crqa_data$asymmetry_corrected, mu = 0)
+```
+
+### 11a-ii. Age-block t-tests — does direction shift across development?
+
+A non-significant overall test may mask a developmental reversal: child-leading at younger ages cancelling out partner-leading at older ages (or vice versa). We split the sample into 1-year age bins and run a one-sample t-test against μ = 0 within each bin. P-values are FDR-adjusted across blocks.
+
+```{r rq3-age-block-tests}
+crqa_data_blocks <- crqa_data %>%
+  filter(!is.na(target_child_age_yrs), !is.na(asymmetry)) %>%
+  mutate(age_block = cut(
+    target_child_age_yrs,
+    breaks         = seq(floor(min(target_child_age_yrs)),
+                         ceiling(max(target_child_age_yrs)),
+                         by = 1),
+    include.lowest = TRUE,
+    right          = FALSE
+  ))
+
+block_tests <- crqa_data_blocks %>%
+  group_by(age_block) %>%
+  filter(n() >= 10) %>%          # require at least 10 transcripts per block
+  summarise(
+    n         = n(),
+    mean_asym = mean(asymmetry_corrected),
+    se_asym   = sd(asymmetry_corrected) / sqrt(n()),
+    t_stat    = t.test(asymmetry_corrected, mu = 0)$statistic,
+    df        = t.test(asymmetry_corrected, mu = 0)$parameter,
+    p_value   = t.test(asymmetry_corrected, mu = 0)$p.value,
+    ci_low    = t.test(asymmetry_corrected, mu = 0)$conf.int[1],
+    ci_high   = t.test(asymmetry_corrected, mu = 0)$conf.int[2],
+    .groups   = "drop"
+  ) %>%
+  mutate(
+    p_adj = p.adjust(p_value, method = "fdr"),
+    sig   = case_when(
+      p_adj < 0.001 ~ "***",
+      p_adj < 0.01  ~ "**",
+      p_adj < 0.05  ~ "*",
+      TRUE          ~ "n.s."
+    )
+  )
+
+print(block_tests %>%
+        mutate(across(where(is.numeric), ~ round(.x, 4))))
+
+# Plot: mean asymmetry per age block with 95% CI and significance label
+ggplot(block_tests, aes(x = age_block, y = mean_asym)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_pointrange(aes(ymin = ci_low, ymax = ci_high, colour = sig),
+                  linewidth = 0.8, fatten = 3) +
+  geom_text(aes(label = sig, y = ci_high), vjust = -0.5, size = 4) +
+  scale_colour_manual(
+    values = c("***" = "#c0392b", "**" = "#e67e22",
+               "*"   = "#27ae60", "n.s." = "grey60"),
+    drop = FALSE
+  ) +
+  labs(
+    title    = "Mean corrected asymmetry by 1-year age block",
+    subtitle = "Positive = child leads | Negative = partner leads\nError bars = 95% CI  |  FDR-adjusted significance",
+    x = "Child age (years)", y = "Mean corrected asymmetry",
+    colour = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top", axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+### 11b. Does directionality vary with child age?
+
+```{r rq3-model}
+m_rq3 <- lmer(
+  asymmetry_corrected ~
+    ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 | target_child_id),
+  data    = crqa_data,
+  REML    = TRUE
+)
+summary(m_rq3)
+```
+
+### 11c. Mean recurrence profile across all transcripts
+
+Observed (red) and shuffled baseline (blue) are shown as separate bands. Where the red band sits clearly above the blue, recurrence exceeds chance. Asymmetry between the two sides of lag 0 indicates directionality.
+
+```{r rq3-profile-plot}
+# Observed profile
+profile_all <- map_dfr(seq_len(nrow(crqa_series_f)), function(i) {
+  cs <- unlist(crqa_series_f$child_series[[i]])
+  ps <- unlist(crqa_series_f$partner_series[[i]])
+  na <- crqa_series_f$n_aligned[i]
+
+  recurrence_profile(cs[1:na], ps[1:na], W = WINDOW_W) %>%
+    mutate(
+      RR            = co / n_cells,
+      transcript_id = crqa_series_f$transcript_id[i]
+    )
+})
+
+# Shuffled profile (same shuffle used in Section 9)
+set.seed(42)
+profile_shuf <- map_dfr(seq_len(nrow(crqa_series_f)), function(i) {
+  cs_shuf <- sample(unlist(crqa_series_f$child_series[[i]]))
+  ps      <- unlist(crqa_series_f$partner_series[[i]])
+  na      <- crqa_series_f$n_aligned[i]
+
+  recurrence_profile(cs_shuf[1:na], ps[1:na], W = WINDOW_W) %>%
+    mutate(
+      RR            = co / n_cells,
+      transcript_id = crqa_series_f$transcript_id[i]
+    )
+})
+
+# Summarise both
+summarise_profile <- function(df, condition) {
+  df %>%
+    group_by(lag) %>%
+    summarise(
+      mean_RR = mean(RR, na.rm = TRUE),
+      se_RR   = sd(RR,   na.rm = TRUE) / sqrt(n()),
+      .groups = "drop"
+    ) %>%
+    mutate(condition = condition)
+}
+
+profile_combined <- bind_rows(
+  summarise_profile(profile_all,  "Observed"),
+  summarise_profile(profile_shuf, "Shuffled")
+)
+
+ggplot(profile_combined, aes(x = lag, y = mean_RR,
+                              colour = condition, fill = condition)) +
+  geom_ribbon(aes(ymin = mean_RR - se_RR, ymax = mean_RR + se_RR),
+              alpha = 0.2, colour = NA) +
+  geom_line(linewidth = 1) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey40") +
+  scale_colour_manual(values = c("Observed" = "#c0392b", "Shuffled" = "#2980b9")) +
+  scale_fill_manual(  values = c("Observed" = "#c0392b", "Shuffled" = "#2980b9")) +
+  scale_x_continuous(breaks = seq(-WINDOW_W, WINDOW_W, by = 2)) +
+  labs(
+    title    = "Mean cross-recurrence profile across all transcripts",
+    subtitle = "Positive lag: child leads | Lag ≤ 0: partner leads  |  (1,1) only",
+    x        = "Lag (turns)", y = "Mean recurrence rate",
+    colour   = NULL, fill = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top")
+```
+
+### 11d. Corrected asymmetry by child age
+
+```{r rq3-age-plot}
+crqa_asym_long <- crqa_data %>%
+  dplyr::select(target_child_age_yrs, asymmetry, asymmetry_shuf) %>%
+  pivot_longer(cols = c(asymmetry, asymmetry_shuf),
+               names_to  = "condition",
+               values_to = "value") %>%
+  mutate(condition = if_else(condition == "asymmetry", "Observed", "Shuffled"))
+
+ggplot(crqa_asym_long, aes(x = target_child_age_yrs, y = value,
+                            colour = condition, fill = condition)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
+  geom_smooth(method = "gam", formula = y ~ s(x, k = 4), alpha = 0.2) +
+  scale_colour_manual(values = c("Observed" = "#2980b9", "Shuffled" = "#c0392b")) +
+  scale_fill_manual(  values = c("Observed" = "#2980b9", "Shuffled" = "#c0392b")) +
+  labs(
+    title    = "Directional asymmetry by child age",
+    subtitle = "Positive = child leads | Negative = partner leads",
+    x        = "Child age (years)", y = "Asymmetry (RR_pos − RR_neg)",
+    colour   = NULL, fill = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top")
+```
+
+------------------------------------------------------------------------
+
+## 12. Save results
+
+```{r save}
+saveRDS(crqa_data,    here("01Data", "02Derived", "rq2_rq3_crqa_results.rds"))
+saveRDS(profile_all,  here("01Data", "02Derived", "crqa_profile_long.rds"))
+saveRDS(profile_shuf, here("01Data", "02Derived", "crqa_profile_shuffled.rds"))
+```
+
+------------------------------------------------------------------------
+
+## 13. Identify dyadic transcripts (target child + exactly 1 partner type)
+
+For the partner-category analysis we restrict to transcripts where the target child interacts with **one** social partner type only. Transcripts where multiple partner categories appear (e.g. mother *and* sibling both speak) are excluded because the partner series would be a mixture of signals and the category label would be ambiguous.
+
+```{r dyadic-identify}
+# Count distinct partner types per transcript (excluding target child)
+dyadic_info <- crqa_all %>%
+  filter(role_category != "Target Child") %>%
+  group_by(transcript_id) %>%
+  summarise(
+    n_partner_types = n_distinct(role_category),
+    partner_type    = if_else(n_distinct(role_category) == 1,
+                              first(role_category), NA_character_),
+    .groups = "drop"
+  )
+
+# Keep only purely dyadic transcripts
+dyadic_ids <- dyadic_info %>% filter(n_partner_types == 1)
+
+cat("Total transcripts in crqa_all:       ", n_distinct(crqa_all$transcript_id), "\n")
+cat("Dyadic (exactly 1 partner type):     ", nrow(dyadic_ids), "\n")
+cat("Excluded (multiple partner types):   ",
+    n_distinct(crqa_all$transcript_id) - nrow(dyadic_ids), "\n\n")
+
+# Transcript counts per partner category
+partner_counts <- dyadic_ids %>%
+  count(partner_type, name = "n_transcripts") %>%
+  arrange(desc(n_transcripts))
+
+cat("Transcripts per partner category:\n")
+print(partner_counts)
+```
+
+------------------------------------------------------------------------
+
+## 14. Set inclusion threshold; select eligible categories
+
+Categories with very few dyadic transcripts cannot support reliable CRQA estimates or mixed-model fitting. We set a minimum of **20 transcripts** per category after all filtering steps; categories below this threshold are excluded.
+
+```{r dyadic-threshold}
+MIN_N <- 20
+
+eligible_categories <- partner_counts %>%
+  filter(n_transcripts >= MIN_N) %>%
+  pull(partner_type)
+
+cat("Categories retained (n_transcripts >=", MIN_N, "):\n")
+print(eligible_categories)
+
+cat("\nCategories excluded:\n")
+print(partner_counts %>% filter(n_transcripts < MIN_N))
+
+dyadic_ids_f <- dyadic_ids %>% filter(partner_type %in% eligible_categories)
+```
+
+------------------------------------------------------------------------
+
+## 15. Rebuild CRQA series for dyadic transcripts
+
+Re-run the full turn-building → partner-first alignment → binary-series pipeline on the dyadic-only subset. The window W and all CRQA functions from Sections 5 and 7 are reused unchanged so that results are directly comparable with the full-sample analysis.
+
+```{r dyadic-series}
+# Attach partner_type to utterance-level data
+crqa_all_dyadic <- crqa_all %>%
+ dplyr::filter (transcript_id %in% dyadic_ids_f$transcript_id) %>%
+  dplyr::left_join(dyadic_ids_f %>% dplyr::select(transcript_id, partner_type),
+            by = "transcript_id")
+
+# Turn building (same logic as Section 3)
+crqa_turns_dyadic <- crqa_all_dyadic %>%
+  group_by(transcript_id) %>%
+  arrange(id, .by_group = TRUE) %>%
+  mutate(
+    speaker_category = if_else(role_category == "Target Child", "child", "partner"),
+    turn_change      = speaker_category != lag(speaker_category,
+                                               default = first(speaker_category)),
+    turn_id          = cumsum(turn_change) + 1L
+  ) %>%
+  group_by(transcript_id, turn_id) %>%
+  summarise(
+    target_child_id  = first(target_child_id),
+    target_child_age = first(target_child_age),
+    target_child_sex = first(target_child_sex),
+    partner_type     = first(partner_type),
+    speaker_category = first(speaker_category),
+    emotion_count    = sum(emotion_count, na.rm = TRUE),
+    n_utts           = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(transcript_id, turn_id)
+
+# Partner-first alignment (same logic as Section 3b)
+crqa_turns_dyadic_pf <- crqa_turns_dyadic %>%
+  group_by(transcript_id) %>%
+  arrange(turn_id, .by_group = TRUE) %>%
+  filter(turn_id >= min(turn_id[speaker_category == "partner"])) %>%
+  ungroup()
+
+# Build binary series per transcript (same logic as Section 4)
+crqa_series_dyadic <- crqa_turns_dyadic_pf %>%
+  mutate(has_emotion = as.integer(emotion_count > 0)) %>%
+  group_by(transcript_id) %>%
+  summarise(
+    target_child_id  = first(target_child_id),
+    target_child_age = first(target_child_age),
+    target_child_sex = first(target_child_sex),
+    partner_type     = first(partner_type),
+    child_series     = list(has_emotion[speaker_category == "child"]),
+    partner_series   = list(has_emotion[speaker_category == "partner"]),
+    n_child_turns    = sum(speaker_category == "child"),
+    n_partner_turns  = sum(speaker_category == "partner"),
+    child_emo_rate   = mean(has_emotion[speaker_category == "child"]),
+    partner_emo_rate = mean(has_emotion[speaker_category == "partner"]),
+    .groups = "drop"
+  ) %>%
+  mutate(n_aligned = pmin(n_child_turns, n_partner_turns))
+
+# Apply same minimum-length filter as Section 6
+crqa_series_dyadic_f <- crqa_series_dyadic %>% filter(n_aligned > WINDOW_W)
+
+cat(sprintf("Dyadic transcripts retained after length filter: %d  |  Excluded: %d\n",
+            nrow(crqa_series_dyadic_f),
+            nrow(crqa_series_dyadic) - nrow(crqa_series_dyadic_f)))
+
+# Re-check counts per category after length filter; flag any that dropped below MIN_N
+final_counts <- count(crqa_series_dyadic_f, partner_type, name = "n_final")
+cat("\nFinal transcript counts per partner category:\n")
+print(final_counts)
+
+below_threshold <- final_counts %>% filter(n_final < MIN_N)
+if (nrow(below_threshold) > 0) {
+  cat("\nCategories dropped (fell below MIN_N after length filter):\n")
+  print(below_threshold)
+  crqa_series_dyadic_f <- crqa_series_dyadic_f %>%
+    filter(partner_type %in% (final_counts %>% filter(n_final >= MIN_N) %>% pull(partner_type)))
+  cat("Final retained categories:", unique(crqa_series_dyadic_f$partner_type), "\n")
+}
+
+# Fix target_child_age: first() in the turn summarise picks up partner rows where age
+# is NA (CHILDES stores age only on child-speaker rows). Reuse age_lookup from Section 9.
+crqa_series_dyadic_f <- crqa_series_dyadic_f %>%
+ dplyr::select(-target_child_age, -target_child_sex, -target_child_id) %>%
+   dplyr::left_join(age_lookup, by = "transcript_id")
+
+cat("\nNA in target_child_age after fix:", sum(is.na(crqa_series_dyadic_f$target_child_age)), "\n")
+```
+
+------------------------------------------------------------------------
+
+## 15b. Age coverage per partner category
+
+```{r age-coverage}
+
+# ── OVERALL: N children and transcripts in dyadic CRQA sample ─────────────
+
+crqa_series_dyadic_f %>%
+  summarise(
+    n_transcripts = n(),
+    n_children    = n_distinct(target_child_id)
+  )
+
+# ── BY PARTNER TYPE: N transcripts, N children, age range, sex ────────────
+
+crqa_series_dyadic_f %>%
+  group_by(partner_type) %>%
+  summarise(
+    n_transcripts  = n(),
+    n_children     = n_distinct(target_child_id),
+    min_age_months = min(target_child_age, na.rm = TRUE),
+    max_age_months = max(target_child_age, na.rm = TRUE),
+    mean_age_months = round(mean(target_child_age, na.rm = TRUE), 1),
+    sd_age_months   = round(sd(target_child_age, na.rm = TRUE), 1),
+    min_age_years  = round(min(target_child_age, na.rm = TRUE) / 12, 1),
+    max_age_years  = round(max(target_child_age, na.rm = TRUE) / 12, 1)
+  )
+
+# ── BY PARTNER TYPE: Sex breakdown ────────────────────────────────────────
+
+crqa_series_dyadic_f %>%
+  distinct(partner_type, target_child_id, target_child_sex) %>%
+  count(partner_type, target_child_sex)
+
+age_coverage <- crqa_series_dyadic_f %>%
+  group_by(partner_type) %>%
+  summarise(
+    n          = n(),
+    age_min    = round(min(target_child_age)  / 12, 2),
+    age_max    = round(max(target_child_age)  / 12, 2),
+    age_mean   = round(mean(target_child_age) / 12, 2),
+    age_median = round(median(target_child_age) / 12, 2),
+    age_sd     = round(sd(target_child_age)   / 12, 2),
+    .groups = "drop"
+  ) %>%
+  arrange(age_min)
+
+print(age_coverage)
+
+# Visual: age distribution per partner type
+ggplot(crqa_series_dyadic_f,
+       aes(x = target_child_age / 12, y = partner_type, fill = partner_type)) +
+  ggridges::geom_density_ridges(alpha = 0.6, scale = 0.9,
+                                 quantile_lines = TRUE, quantiles = 2) +
+  labs(
+    title    = "Age distribution of transcripts by partner type",
+    subtitle = "Vertical line = median age  |  dyadic transcripts only",
+    x = "Child age (years)", y = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "none")
+```
+
+------------------------------------------------------------------------
+
+## 16. Compute observed wRR and asymmetry per dyadic transcript
+
+Uses the same `recurrence_profile()` and `summarise_crqa()` functions from Section 7 and the same global window W.
+
+```{r dyadic-observed}
+crqa_results_dyadic <- map_dfr(seq_len(nrow(crqa_series_dyadic_f)), function(i) {
+  cs <- unlist(crqa_series_dyadic_f$child_series[[i]])
+  ps <- unlist(crqa_series_dyadic_f$partner_series[[i]])
+  na <- crqa_series_dyadic_f$n_aligned[i]
+
+  recurrence_profile(cs[1:na], ps[1:na], W = WINDOW_W) %>%
+    summarise_crqa() %>%
+    mutate(
+      transcript_id    = crqa_series_dyadic_f$transcript_id[i],
+      target_child_id  = crqa_series_dyadic_f$target_child_id[i],
+      target_child_age = crqa_series_dyadic_f$target_child_age[i],
+      target_child_sex = crqa_series_dyadic_f$target_child_sex[i],
+      partner_type     = crqa_series_dyadic_f$partner_type[i]
+    )
+})
+
+# Shuffled baseline (same seed as Section 9 for reproducibility)
+set.seed(42)
+crqa_shuffled_dyadic <- map_dfr(seq_len(nrow(crqa_series_dyadic_f)), function(i) {
+  cs_shuf <- sample(unlist(crqa_series_dyadic_f$child_series[[i]]))
+  ps      <- unlist(crqa_series_dyadic_f$partner_series[[i]])
+  na      <- crqa_series_dyadic_f$n_aligned[i]
+
+  recurrence_profile(cs_shuf[1:na], ps[1:na], W = WINDOW_W) %>%
+    summarise_crqa() %>%
+    rename(wRR_shuf = wRR, RR_pos_shuf = RR_pos,
+           RR_neg_shuf = RR_neg, asymmetry_shuf = asymmetry) %>%
+    mutate(transcript_id = crqa_series_dyadic_f$transcript_id[i])
+})
+
+# Combine and compute excess / corrected asymmetry
+# Re-join age_lookup to guarantee non-NA age (see fix in Section 15)
+crqa_data_dyadic <- crqa_results_dyadic %>%
+  dplyr::left_join(crqa_shuffled_dyadic, by = "transcript_id") %>%
+  dplyr::select(-target_child_age, -target_child_sex, -target_child_id) %>%
+  dplyr::left_join(age_lookup, by = "transcript_id") %>%
+  mutate(
+    wRR_excess           = wRR - wRR_shuf,
+    asymmetry_corrected  = (RR_pos - RR_pos_shuf) - (RR_neg - RR_neg_shuf),
+    target_child_age_yrs = target_child_age / 12,
+    partner_type         = factor(partner_type)
+  )
+
+cat("Dyadic CRQA data rows:", nrow(crqa_data_dyadic), "\n")
+crqa_data_dyadic %>%
+  group_by(partner_type) %>%
+  summarise(
+    n         = n(),
+    mean_wRR  = round(mean(wRR),              4),
+    mean_exc  = round(mean(wRR_excess),       4),
+    mean_asym = round(mean(asymmetry_corrected), 4),
+    .groups = "drop"
+  ) %>%
+  print()
+```
+
+------------------------------------------------------------------------
+
+## 17. Compare CRQA across partner categories
+
+### 17a. Observed wRR by child age, per partner type
+
+```{r partner-wrr-age-plot}
+ggplot() +
+  # Single pooled shuffled baseline from full-sample analysis (Section 9)
+  geom_smooth(
+    data    = crqa_data,
+    mapping = aes(x = target_child_age_yrs, y = wRR_shuf,
+                  linetype = "Shuffled baseline"),
+    method  = "gam", formula = y ~ s(x, k = 4),
+    colour  = "grey50", fill = "grey70", alpha = 0.25, linewidth = 0.9
+  ) +
+  # Observed wRR coloured by partner type
+  geom_smooth(
+    data    = crqa_data_dyadic,
+    mapping = aes(x = target_child_age_yrs, y = wRR,
+                  colour = partner_type, fill = partner_type),
+    method  = "gam", formula = y ~ s(x, k = 4),
+    alpha = 0.15, linewidth = 1.1
+  ) +
+  scale_linetype_manual(name = NULL, values = c("Shuffled baseline" = "dashed")) +
+  labs(
+    title    = "Emotion-word co-occurrence (wRR) by child age and partner type",
+    subtitle = "Coloured = observed per partner  |  Grey = pooled shuffled baseline  |  GAM smooth  |  dyadic transcripts only",
+    x = "Child age (years)", y = "Observed wRR",
+    colour = "Partner type", fill = "Partner type"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top")
+```
+
+### 17b. Corrected asymmetry by child age, per partner type
+
+```{r partner-asym-age-plot}
+ggplot() +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
+  # Single pooled shuffled baseline from full-sample analysis (Section 9)
+  geom_smooth(
+    data    = crqa_data,
+    mapping = aes(x = target_child_age_yrs, y = asymmetry_shuf,
+                  linetype = "Shuffled baseline"),
+    method  = "gam", formula = y ~ s(x, k = 4),
+    colour  = "grey50", fill = "grey70", alpha = 0.25, linewidth = 0.9
+  ) +
+  # Observed asymmetry coloured by partner type
+  geom_smooth(
+    data    = crqa_data_dyadic,
+    mapping = aes(x = target_child_age_yrs, y = asymmetry,
+                  colour = partner_type, fill = partner_type),
+    method  = "gam", formula = y ~ s(x, k = 4),
+    alpha = 0.15, linewidth = 1.1
+  ) +
+  scale_linetype_manual(name = NULL, values = c("Shuffled baseline" = "dashed")) +
+  labs(
+    title    = "Directional asymmetry by child age and partner type",
+    subtitle = "Positive = child leads | Negative = partner leads\nColoured = observed per partner  |  Grey = pooled shuffled baseline  |  GAM smooth  |  dyadic transcripts only",
+    x = "Child age (years)", y = "Asymmetry index (RR_pos − RR_neg)",
+    colour = "Partner type", fill = "Partner type"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top")
+```
+
+### 17c. Mixed model — does wRR excess differ by partner type?
+
+`Mother` is used as the reference level. The random intercept for `target_child_id` accounts for children contributing multiple transcripts. The model includes a `partner_type × age` interaction to test whether developmental trajectories differ across partner categories.
+
+```{r partner-wrr-model}
+crqa_data_dyadic <- crqa_data_dyadic %>%
+  mutate(partner_type = relevel(partner_type, ref = "Mother"))
+
+m_partner_wrr <- lmer(
+  wRR_excess ~
+    partner_type * ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 | target_child_id),
+  data = crqa_data_dyadic,
+  REML = TRUE
+)
+summary(m_partner_wrr)
+
+# Likelihood-ratio test: is the interaction warranted?
+m_partner_wrr_noint <- lmer(
+  wRR_excess ~
+    partner_type +
+    ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 | target_child_id),
+  data = crqa_data_dyadic,
+  REML = FALSE
+)
+m_partner_wrr_int <- lmer(
+  wRR_excess ~
+    partner_type * ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 | target_child_id),
+  data = crqa_data_dyadic,
+  REML = FALSE
+)
+anova(m_partner_wrr_noint, m_partner_wrr_int)
+```
+
+```{r partner-wrr-interaction-plot, message=FALSE}
+# Model-predicted wRR excess across age per partner type
+pred_wrr <- ggeffects::ggpredict(
+  m_partner_wrr,
+  terms = c("target_child_age_yrs [all]", "partner_type")
+)
+
+plot(pred_wrr) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
+  labs(
+    title    = "Predicted wRR excess by child age and partner type",
+    subtitle = "Model-estimated trajectories  |  partner_type × age interaction  |  shading = 95% CI",
+    x = "Child age (years)", y = "Predicted wRR excess",
+    colour = "Partner type", fill = "Partner type"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top")
+```
+
+### 17d. Mixed model — does asymmetry differ by partner type?
+
+```{r partner-asym-model}
+m_partner_asym <- lmer(
+  asymmetry_corrected ~
+    partner_type +
+    ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 | target_child_id),
+  data = crqa_data_dyadic,
+  REML = TRUE
+)
+summary(m_partner_asym)
+```
+
+### 17f. Estimated marginal means per partner type
+
+`emmeans` averages predictions over child age and sex, so each point reflects the model-adjusted mean for that partner category on a common baseline. This is the most interpretable summary of the two models.
+
+```{r partner-emm-plot, message=FALSE}
+library(emmeans)
+
+emm_wrr  <- emmeans(m_partner_wrr,  ~ partner_type) %>%
+  as_tibble() %>% mutate(outcome = "wRR excess")
+
+emm_asym <- emmeans(m_partner_asym, ~ partner_type) %>%
+  as_tibble() %>% mutate(outcome = "Corrected asymmetry")
+
+emm_all <- bind_rows(emm_wrr, emm_asym) %>%
+  mutate(outcome = factor(outcome, levels = c("wRR excess", "Corrected asymmetry")))
+
+ggplot(emm_all,
+       aes(x = reorder(partner_type, emmean), y = emmean, colour = partner_type)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_pointrange(aes(ymin = lower.CL, ymax = upper.CL),
+                  linewidth = 0.8, fatten = 3) +
+  facet_wrap(~ outcome, scales = "free_x") +
+  coord_flip() +
+  labs(
+    title    = "Model-estimated marginal means by social partner type",
+    subtitle = "Averaged over child age and sex  |  95% confidence intervals",
+    x = NULL, y = "Estimated marginal mean"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "none")
+```
+
+------------------------------------------------------------------------
+
+## 18. Save partner-category results
+
+```{r save-dyadic}
+saveRDS(crqa_data_dyadic,    here("01Data", "02Derived", "crqa_dyadic_results.rds"))
+```
+
