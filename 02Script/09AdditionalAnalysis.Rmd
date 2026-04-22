@@ -269,7 +269,7 @@ ggplot(pred_mod, aes(x = x, y = predicted,
 
 ### 6e. Partial R² — unique variance explained by key predictors
 
-Semi-partial R² for each term is estimated by nested model comparison: marginal R² of the full model minus marginal R² of a model with that term removed (Nakagawa & Schielzeth, 2013; computed via `MuMIn::r.squaredGLMM()`). Models are refit with ML (REML = FALSE) for comparability.
+Semi-partial R² for each term is estimated by nested model comparison: marginal R²m (fixed effects only) and conditional R²c (fixed + random effects) of the full model minus the same quantity from a model with that term removed (Nakagawa & Schielzeth, 2013; computed via `MuMIn::r.squaredGLMM()`). Models are refit with ML (REML = FALSE) for comparability.
 
 ```{r part1-partial-r2}
 # Refit models with ML for nested comparison
@@ -303,26 +303,56 @@ m_no_between_ml <- lmer(
   control = lmerControl(optimizer = "bobyqa")
 )
 
-r2_full       <- r.squaredGLMM(m_mod_ml)[1,       "R2m"]
-r2_no_within  <- r.squaredGLMM(m_no_within_ml)[1,  "R2m"]
-r2_no_int     <- r.squaredGLMM(m_no_int_ml)[1,     "R2m"]
-r2_no_between <- r.squaredGLMM(m_no_between_ml)[1, "R2m"]
+# Without any age terms (main effect + all interactions removed)
+m_no_age_ml <- lmer(
+  child_emo_rate ~
+    partner_emo_within +
+    partner_emo_between +
+    target_child_sex +
+    (1 | corpus_name) +
+    (1 + partner_emo_within | target_child_id),
+  data    = transcript_all,
+  REML    = FALSE,
+  control = lmerControl(optimizer = "bobyqa")
+)
+
+# Extract full R2m and R2c vectors
+r2_full       <- r.squaredGLMM(m_mod_ml)[1, ]
+r2_no_within  <- r.squaredGLMM(m_no_within_ml)[1, ]
+r2_no_int     <- r.squaredGLMM(m_no_int_ml)[1, ]
+r2_no_between <- r.squaredGLMM(m_no_between_ml)[1, ]
+r2_no_age     <- r.squaredGLMM(m_no_age_ml)[1, ]
 
 partial_r2_table <- tibble(
   Term = c(
-    "partner_emo_within (main effect + age interaction)",
-    "partner_emo_within × age interaction only",
-    "partner_emo_between (main effect + age interaction)"
+    "Partner → child contingency (within-child)",
+    "Age moderation of partner → child effect",
+    "Stable partner emotion use (between-child)",
+    "Child age (developmental trajectory, all terms)"
   ),
-  Full_R2m    = round(r2_full, 4),
-  Reduced_R2m = round(c(r2_no_within, r2_no_int, r2_no_between), 4),
-  Partial_R2  = round(c(
-    r2_full - r2_no_within,
-    r2_full - r2_no_int,
-    r2_full - r2_no_between
+  Full_R2m    = round(r2_full["R2m"], 4),
+  Reduced_R2m = round(c(r2_no_within["R2m"], r2_no_int["R2m"],
+                         r2_no_between["R2m"], r2_no_age["R2m"]), 4),
+  Partial_R2m = round(c(
+    r2_full["R2m"] - r2_no_within["R2m"],
+    r2_full["R2m"] - r2_no_int["R2m"],
+    r2_full["R2m"] - r2_no_between["R2m"],
+    r2_full["R2m"] - r2_no_age["R2m"]
+  ), 4),
+  Full_R2c    = round(r2_full["R2c"], 4),
+  Reduced_R2c = round(c(r2_no_within["R2c"], r2_no_int["R2c"],
+                         r2_no_between["R2c"], r2_no_age["R2c"]), 4),
+  Partial_R2c = round(c(
+    r2_full["R2c"] - r2_no_within["R2c"],
+    r2_full["R2c"] - r2_no_int["R2c"],
+    r2_full["R2c"] - r2_no_between["R2c"],
+    r2_full["R2c"] - r2_no_age["R2c"]
   ), 4)
 )
 
+cat(sprintf("Full model: R2m = %.4f,  R2c = %.4f\n", r2_full["R2m"], r2_full["R2c"]))
+cat(sprintf("Variance in random effects alone: R2c - R2m = %.4f\n\n",
+            r2_full["R2c"] - r2_full["R2m"]))
 print(partial_r2_table)
 ```
 
