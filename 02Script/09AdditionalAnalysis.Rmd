@@ -323,6 +323,16 @@ r2_no_int     <- r.squaredGLMM(m_no_int_ml)[1, ]
 r2_no_between <- r.squaredGLMM(m_no_between_ml)[1, ]
 r2_no_age     <- r.squaredGLMM(m_no_age_ml)[1, ]
 
+# Note: partial R2c is NOT computed because removing fixed effects causes random
+# effects to absorb the freed variance, inflating R2c in reduced models and
+# producing negative "partial" values. R2m is the correct metric for partial R2.
+# R2c is reported only for the full model to show total variance accounted for.
+
+cat(sprintf("Full model: R2m = %.4f  (fixed effects only)\n", r2_full["R2m"]))
+cat(sprintf("            R2c = %.4f  (fixed + random effects)\n", r2_full["R2c"]))
+cat(sprintf("            R2c - R2m = %.4f  (variance in random effects / individual differences)\n\n",
+            r2_full["R2c"] - r2_full["R2m"]))
+
 partial_r2_table <- tibble(
   Term = c(
     "Partner → child contingency (within-child)",
@@ -338,21 +348,9 @@ partial_r2_table <- tibble(
     r2_full["R2m"] - r2_no_int["R2m"],
     r2_full["R2m"] - r2_no_between["R2m"],
     r2_full["R2m"] - r2_no_age["R2m"]
-  ), 4),
-  Full_R2c    = round(r2_full["R2c"], 4),
-  Reduced_R2c = round(c(r2_no_within["R2c"], r2_no_int["R2c"],
-                         r2_no_between["R2c"], r2_no_age["R2c"]), 4),
-  Partial_R2c = round(c(
-    r2_full["R2c"] - r2_no_within["R2c"],
-    r2_full["R2c"] - r2_no_int["R2c"],
-    r2_full["R2c"] - r2_no_between["R2c"],
-    r2_full["R2c"] - r2_no_age["R2c"]
   ), 4)
 )
 
-cat(sprintf("Full model: R2m = %.4f,  R2c = %.4f\n", r2_full["R2m"], r2_full["R2c"]))
-cat(sprintf("Variance in random effects alone: R2c - R2m = %.4f\n\n",
-            r2_full["R2c"] - r2_full["R2m"]))
 print(partial_r2_table)
 ```
 
