@@ -103,7 +103,42 @@ transcript_all <- speaker_summary_all %>%
     partner_utts     = n_utterances_partner
   ) %>%
   left_join(age_lookup, by = "transcript_id") %>%
-  mutate(target_child_age_yrs = target_child_age / 12) %>%
+  mutate(target_child_age_yrs = target_child_age / 12)
+
+# --- Stepwise attrition: shows which filter removes the most children ---
+# (transcript_all_pre holds all columns before any filter)
+transcript_all_pre <- transcript_all  # at this point filters not yet applied
+
+attrition_table <- tibble(
+  Step = c(
+    "0. Pre-filter (all transcripts in utt)",
+    "1. + child & partner both spoke",
+    "2. + age data present",
+    "3. + child >= 10 tokens",
+    "4. + partner >= 10 tokens  [final]"
+  ),
+  n_transcripts = c(
+    nrow(transcript_all_pre),
+    nrow(transcript_all_pre %>% filter(!is.na(child_emo_rate), !is.na(partner_emo_rate))),
+    nrow(transcript_all_pre %>% filter(!is.na(child_emo_rate), !is.na(partner_emo_rate), !is.na(target_child_age_yrs))),
+    nrow(transcript_all_pre %>% filter(!is.na(child_emo_rate), !is.na(partner_emo_rate), !is.na(target_child_age_yrs), child_tokens >= 10)),
+    nrow(transcript_all_pre %>% filter(!is.na(child_emo_rate), !is.na(partner_emo_rate), !is.na(target_child_age_yrs), child_tokens >= 10, partner_tokens >= 10))
+  ),
+  n_children = c(
+    n_distinct(transcript_all_pre$target_child_id),
+    n_distinct((transcript_all_pre %>% filter(!is.na(child_emo_rate), !is.na(partner_emo_rate)))$target_child_id),
+    n_distinct((transcript_all_pre %>% filter(!is.na(child_emo_rate), !is.na(partner_emo_rate), !is.na(target_child_age_yrs)))$target_child_id),
+    n_distinct((transcript_all_pre %>% filter(!is.na(child_emo_rate), !is.na(partner_emo_rate), !is.na(target_child_age_yrs), child_tokens >= 10))$target_child_id),
+    n_distinct((transcript_all_pre %>% filter(!is.na(child_emo_rate), !is.na(partner_emo_rate), !is.na(target_child_age_yrs), child_tokens >= 10, partner_tokens >= 10))$target_child_id)
+  )
+) %>%
+  mutate(transcripts_lost = lag(n_transcripts, default = first(n_transcripts)) - n_transcripts,
+         children_lost    = lag(n_children,    default = first(n_children))    - n_children)
+
+print(attrition_table)
+
+# Apply all filters
+transcript_all <- transcript_all %>%
   filter(
     !is.na(child_emo_rate),
     !is.na(partner_emo_rate),
@@ -112,9 +147,10 @@ transcript_all <- speaker_summary_all %>%
     partner_tokens >= 10
   )
 
-cat("Transcripts (full sample):", nrow(transcript_all), "\n")
-cat("Children:                 ", n_distinct(transcript_all$target_child_id), "\n")
-cat("Age range:                ", round(min(transcript_all$target_child_age_yrs), 2),
+cat("\nFinal analytic sample:\n")
+cat("Transcripts:", nrow(transcript_all), "\n")
+cat("Children:   ", n_distinct(transcript_all$target_child_id), "\n")
+cat("Age range:  ", round(min(transcript_all$target_child_age_yrs), 2),
     "–", round(max(transcript_all$target_child_age_yrs), 2), "years\n")
 ```
 
@@ -315,7 +351,7 @@ print(vc_corpus)
 anova(update(m_mod, REML = FALSE), update(m_mod_corpus, REML = FALSE))
 ```
 
-If the corpus variance is small (< 10% of child-level variance) and the LRT is non-significant, the base model without corpus is defensible. If corpus variance is substantial, use `m_mod_corpus` as the primary model and note the nesting in the methods.
+If the corpus variance is small (\< 10% of child-level variance) and the LRT is non-significant, the base model without corpus is defensible. If corpus variance is substantial, use `m_mod_corpus` as the primary model and note the nesting in the methods.
 
 ------------------------------------------------------------------------
 
