@@ -12,7 +12,7 @@ This analysis operates at the **transcript level** (one observation per transcri
 
 Two sections are reported:
 
-**Part 1 — Full sample**: All transcripts retained. All non-child speakers collapsed into one "partner" category. Tests the overall partner → child association and its developmental moderation and mediation.
+**Part 1 — Full sample**: All transcripts retained. All non-child speakers collapsed into one "partner" category. Tests the overall partner → child association and its developmental moderation.
 
 **Part 2 — Partner-type comparison**: Restricted to transcripts where the child speaks to exactly one partner type. Tests whether the partner → child association differs by who the child is talking to (Mother, Father, Sibling, etc.).
 
@@ -110,26 +110,30 @@ transcript_all <- speaker_summary_all %>%
 transcript_all_pre <- transcript_all  # at this point filters not yet applied
 
 attrition_table <- tibble(
+  # Note: Step 1 uses utterance count (n_utterances), not token count, because
+  # num_tokens is NA for many CHILDES utterances — sum(NA, na.rm=TRUE) = 0,
+  # so token-based checks would falsely exclude transcripts where a speaker
+  # did utter sentences but token counts were not recorded.
   Step = c(
     "0. Pre-filter (all transcripts in utt)",
-    "1. + child & partner both have tokens > 0",
+    "1. + child & partner both have utterances",
     "2. + age data present",
     "3. + child >= 10 tokens",
     "4. + partner >= 10 tokens  [final]"
   ),
   n_transcripts = c(
     nrow(transcript_all_pre),
-    nrow(transcript_all_pre %>% filter(!is.na(child_tokens), child_tokens > 0, !is.na(partner_tokens), partner_tokens > 0)),
-    nrow(transcript_all_pre %>% filter(!is.na(child_tokens), child_tokens > 0, !is.na(partner_tokens), partner_tokens > 0, !is.na(target_child_age_yrs))),
-    nrow(transcript_all_pre %>% filter(!is.na(child_tokens), child_tokens > 0, !is.na(partner_tokens), partner_tokens > 0, !is.na(target_child_age_yrs), child_tokens >= 10)),
-    nrow(transcript_all_pre %>% filter(!is.na(child_tokens), child_tokens > 0, !is.na(partner_tokens), partner_tokens > 0, !is.na(target_child_age_yrs), child_tokens >= 10, partner_tokens >= 10))
+    nrow(transcript_all_pre %>% filter(!is.na(child_utts),  child_utts  > 0, !is.na(partner_utts), partner_utts > 0)),
+    nrow(transcript_all_pre %>% filter(!is.na(child_utts),  child_utts  > 0, !is.na(partner_utts), partner_utts > 0, !is.na(target_child_age_yrs))),
+    nrow(transcript_all_pre %>% filter(!is.na(child_utts),  child_utts  > 0, !is.na(partner_utts), partner_utts > 0, !is.na(target_child_age_yrs), child_tokens >= 10)),
+    nrow(transcript_all_pre %>% filter(!is.na(child_utts),  child_utts  > 0, !is.na(partner_utts), partner_utts > 0, !is.na(target_child_age_yrs), child_tokens >= 10, partner_tokens >= 10))
   ),
   n_children = c(
     n_distinct(transcript_all_pre$target_child_id),
-    n_distinct((transcript_all_pre %>% filter(!is.na(child_tokens), child_tokens > 0, !is.na(partner_tokens), partner_tokens > 0))$target_child_id),
-    n_distinct((transcript_all_pre %>% filter(!is.na(child_tokens), child_tokens > 0, !is.na(partner_tokens), partner_tokens > 0, !is.na(target_child_age_yrs)))$target_child_id),
-    n_distinct((transcript_all_pre %>% filter(!is.na(child_tokens), child_tokens > 0, !is.na(partner_tokens), partner_tokens > 0, !is.na(target_child_age_yrs), child_tokens >= 10))$target_child_id),
-    n_distinct((transcript_all_pre %>% filter(!is.na(child_tokens), child_tokens > 0, !is.na(partner_tokens), partner_tokens > 0, !is.na(target_child_age_yrs), child_tokens >= 10, partner_tokens >= 10))$target_child_id)
+    n_distinct((transcript_all_pre %>% filter(!is.na(child_utts),  child_utts  > 0, !is.na(partner_utts), partner_utts > 0))$target_child_id),
+    n_distinct((transcript_all_pre %>% filter(!is.na(child_utts),  child_utts  > 0, !is.na(partner_utts), partner_utts > 0, !is.na(target_child_age_yrs)))$target_child_id),
+    n_distinct((transcript_all_pre %>% filter(!is.na(child_utts),  child_utts  > 0, !is.na(partner_utts), partner_utts > 0, !is.na(target_child_age_yrs), child_tokens >= 10))$target_child_id),
+    n_distinct((transcript_all_pre %>% filter(!is.na(child_utts),  child_utts  > 0, !is.na(partner_utts), partner_utts > 0, !is.na(target_child_age_yrs), child_tokens >= 10, partner_tokens >= 10))$target_child_id)
   )
 ) %>%
   mutate(transcripts_lost = lag(n_transcripts, default = first(n_transcripts)) - n_transcripts,
@@ -371,7 +375,7 @@ cat("Variance components:\n")
 print(vc_corpus)
 ```
 
-**Decision:** If corpus ICC < .05 and corpus variance < 5% of total, the base model `m_mod` is well-justified. Non-convergence is consistent with near-zero corpus variance and further supports this conclusion. Report in the methods as: *"Corpus-level clustering was examined via ICC and a random-intercept model; corpus variance accounted for < X% of total variance (ICC = .XX), so corpus was not included as a random effect."*
+**Decision:** If corpus ICC \< .05 and corpus variance \< 5% of total, the base model `m_mod` is well-justified. Non-convergence is consistent with near-zero corpus variance and further supports this conclusion. Report in the methods as: *"Corpus-level clustering was examined via ICC and a random-intercept model; corpus variance accounted for \< X% of total variance (ICC = .XX), so corpus was not included as a random effect."*
 
 ------------------------------------------------------------------------
 
