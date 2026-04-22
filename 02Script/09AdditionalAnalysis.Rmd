@@ -26,7 +26,7 @@ library(lme4)
 library(lmerTest)
 library(splines)
 library(emmeans)
-library(mediation)
+library(MuMIn)        # partial R² via nested model comparison
 library(broom.mixed)
 library(ggeffects)
 ```
@@ -57,6 +57,7 @@ age_lookup <- utt %>%
     target_child_age = first(target_child_age),
     target_child_sex = first(target_child_sex),
     target_child_id  = first(target_child_id),
+    corpus_name      = first(corpus_name),
     .groups = "drop"
   )
 ```
@@ -222,67 +223,99 @@ ggplot(pred_mod, aes(x = x, y = predicted,
   theme(legend.position = "top")
 ```
 
-------------------------------------------------------------------------
+> **Note (Section 6d):** The moderation plot above is generated directly from `m_mod`, which uses `ns(target_child_age_yrs, df = 3)` — a natural spline — not binned or categorical age. Predictions are drawn from the fitted spline model via `ggpredict()`.
 
-## 7. Mediation — does partner rate explain the age effect on child rate?
+### 6e. Partial R² — unique variance explained by key predictors
 
-**Causal chain**: Age → partner_emo_rate → child_emo_rate
+Semi-partial R² for each term is estimated by nested model comparison: marginal R² of the full model minus marginal R² of a model with that term removed (Nakagawa & Schielzeth, 2013; computed via `MuMIn::r.squaredGLMM()`). Models are refit with ML (REML = FALSE) for comparability.
 
-### 7a. Path a: age → partner rate
+```{r part1-partial-r2}
+# Refit models with ML for nested comparison
+m_mod_ml <- update(m_mod, REML = FALSE)
 
-```{r part1-path-a}
-m_med_a <- lmer(
-  partner_emo_rate ~
-    ns(target_child_age_yrs, df = 3) +
-    target_child_sex +
-    (1 | target_child_id),
-  data = transcript_all,
-  REML = TRUE
-)
-summary(m_med_a)
-```
-
-### 7b. Path b: partner rate → child rate (controlling age)
-
-```{r part1-path-b}
-m_med_b <- lmer(
+# Without partner_emo_within (main effect + interaction removed; random slope simplified)
+m_no_within_ml <- lmer(
   child_emo_rate ~
-    partner_emo_rate +
     ns(target_child_age_yrs, df = 3) +
+    partner_emo_between * ns(target_child_age_yrs, df = 3) +
     target_child_sex +
     (1 | target_child_id),
-  data = transcript_all,
-  REML = TRUE
-)
-summary(m_med_b)
-```
-
-### 7c. Bootstrap indirect effect
-
-```{r part1-mediation}
-med_data <- transcript_all %>%
-  filter(!is.na(target_child_age_yrs), !is.na(partner_emo_rate),
-         !is.na(child_emo_rate), !is.na(target_child_sex))
-
-m_med_a_lm <- lm(partner_emo_rate ~ target_child_age_yrs + target_child_sex,
-                  data = med_data)
-
-m_med_b_lm <- lm(child_emo_rate ~ partner_emo_rate + target_child_age_yrs +
-                    target_child_sex, data = med_data)
-
-set.seed(42)
-med_out <- mediate(
-  model.m  = m_med_a_lm,
-  model.y  = m_med_b_lm,
-  treat    = "target_child_age_yrs",
-  mediator = "partner_emo_rate",
-  boot     = TRUE,
-  sims     = 1000
+  data    = transcript_all,
+  REML    = FALSE,
+  control = lmerControl(optimizer = "bobyqa")
 )
 
-summary(med_out)
-plot(med_out)
+# Without partner_emo_within × age interaction (main effect retained) — m_mod_noint exists
+m_no_int_ml <- update(m_mod_noint, REML = FALSE)
+
+# Without partner_emo_between (main effect + interaction removed)
+m_no_between_ml <- lmer(
+  child_emo_rate ~
+    partner_emo_within * ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 + partner_emo_within | target_child_id),
+  data    = transcript_all,
+  REML    = FALSE,
+  control = lmerControl(optimizer = "bobyqa")
+)
+
+r2_full       <- r.squaredGLMM(m_mod_ml)[1,       "R2m"]
+r2_no_within  <- r.squaredGLMM(m_no_within_ml)[1,  "R2m"]
+r2_no_int     <- r.squaredGLMM(m_no_int_ml)[1,     "R2m"]
+r2_no_between <- r.squaredGLMM(m_no_between_ml)[1, "R2m"]
+
+partial_r2_table <- tibble(
+  Term = c(
+    "partner_emo_within (main effect + age interaction)",
+    "partner_emo_within × age interaction only",
+    "partner_emo_between (main effect + age interaction)"
+  ),
+  Full_R2m    = round(r2_full, 4),
+  Reduced_R2m = round(c(r2_no_within, r2_no_int, r2_no_between), 4),
+  Partial_R2  = round(c(
+    r2_full - r2_no_within,
+    r2_full - r2_no_int,
+    r2_full - r2_no_between
+  ), 4)
+)
+
+print(partial_r2_table)
 ```
+
+### 6f. Corpus random effect — is accounting for CHILDES corpus necessary?
+
+CHILDES transcripts come from different corpora (labs, studies, demographic groups) that may systematically differ in emotion word rates. Adding a corpus-level random intercept `(1 | corpus_name)` absorbs this between-corpus variance. If the corpus variance component is near zero, the simpler child-only model is sufficient.
+
+```{r part1-corpus-re}
+# corpus_name is available in transcript_all via age_lookup
+m_mod_corpus <- lmer(
+  child_emo_rate ~
+    partner_emo_within  * ns(target_child_age_yrs, df = 3) +
+    partner_emo_between * ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 + partner_emo_within | target_child_id) +
+    (1 | corpus_name),
+  data    = transcript_all,
+  REML    = TRUE,
+  control = lmerControl(optimizer = "bobyqa")
+)
+
+summary(m_mod_corpus)
+
+# Extract and compare variance components
+vc_base   <- as.data.frame(VarCorr(m_mod))
+vc_corpus <- as.data.frame(VarCorr(m_mod_corpus))
+
+cat("\n--- Variance components: base model ---\n")
+print(vc_base)
+cat("\n--- Variance components: + corpus random effect ---\n")
+print(vc_corpus)
+
+# LRT: does adding corpus improve fit?
+anova(update(m_mod, REML = FALSE), update(m_mod_corpus, REML = FALSE))
+```
+
+If the corpus variance is small (< 10% of child-level variance) and the LRT is non-significant, the base model without corpus is defensible. If corpus variance is substantial, use `m_mod_corpus` as the primary model and note the nesting in the methods.
 
 ------------------------------------------------------------------------
 
@@ -560,6 +593,216 @@ ggplot(slope_est,
 
 ------------------------------------------------------------------------
 
+## 14b. Moderation by partner type — does age moderate the partner → child slope separately for each partner category?
+
+First, check how many transcripts and children are available per partner type. Partner types with fewer transcripts will produce less reliable age-moderation estimates.
+
+```{r part2-mod-feasibility}
+n_by_type <- transcript_dyadic %>%
+  group_by(partner_type) %>%
+  summarise(
+    n_transcripts = n(),
+    n_children    = n_distinct(target_child_id),
+    age_min       = round(min(target_child_age_yrs),  1),
+    age_max       = round(max(target_child_age_yrs),  1),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(n_transcripts))
+
+print(n_by_type)
+
+# Eligible: enough transcripts for a spline moderation + random effects
+# Conservative threshold: >= 100 transcripts AND >= 20 children
+eligible_mod_types <- n_by_type %>%
+  filter(n_transcripts >= 100, n_children >= 20) %>%
+  pull(partner_type)
+
+cat("\nEligible for per-type moderation model:", paste(eligible_mod_types, collapse = ", "), "\n")
+```
+
+For each eligible partner type, fit the same spline moderation model as Section 6 and collect predictions. Partner types below the threshold are excluded from this plot.
+
+```{r part2-mod-by-type}
+pred_list <- map(eligible_mod_types, function(pt) {
+  d_pt <- transcript_dyadic %>%
+    filter(partner_type == pt) %>%
+    group_by(target_child_id) %>%
+    mutate(
+      partner_emo_between = mean(partner_emo_rate, na.rm = TRUE),
+      partner_emo_within  = partner_emo_rate - partner_emo_between
+    ) %>%
+    ungroup()
+
+  m_pt <- tryCatch(
+    lmer(
+      child_emo_rate ~
+        partner_emo_within * ns(target_child_age_yrs, df = 3) +
+        partner_emo_between +
+        target_child_sex +
+        (1 + partner_emo_within | target_child_id),
+      data    = d_pt,
+      REML    = TRUE,
+      control = lmerControl(optimizer = "bobyqa")
+    ),
+    error = function(e) {
+      # Fallback: random intercept only if random slope fails to converge
+      lmer(
+        child_emo_rate ~
+          partner_emo_within * ns(target_child_age_yrs, df = 3) +
+          partner_emo_between +
+          target_child_sex +
+          (1 | target_child_id),
+        data    = d_pt,
+        REML    = TRUE,
+        control = lmerControl(optimizer = "bobyqa")
+      )
+    }
+  )
+
+  ggpredict(
+    m_pt,
+    terms = c("partner_emo_within [all]",
+              "target_child_age_yrs [2, 4, 6, 8, 10]")
+  ) %>%
+    as_tibble() %>%
+    mutate(partner_type = pt)
+})
+
+pred_by_type <- bind_rows(pred_list)
+
+ggplot(pred_by_type, aes(x = x, y = predicted,
+                          colour = group, fill = group)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high),
+              alpha = 0.15, colour = NA) +
+  geom_line(linewidth = 0.8) +
+  facet_wrap(~ partner_type) +
+  labs(
+    title    = "Partner → child emotion rate by age, per partner type",
+    subtitle = "Within-child effect  |  per-type spline moderation models  |  marginalised over sex and between-child rate",
+    x        = "Partner emotion rate (within-child deviation)",
+    y        = "Predicted child emotion rate",
+    colour   = "Child age (years)", fill = "Child age (years)"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "top",
+        strip.text = element_text(face = "bold"))
+```
+
+------------------------------------------------------------------------
+
+## 14c. Three-way interaction — does the age moderation of the partner → child slope differ by partner type? (optional)
+
+Tests whether the developmental trajectory of the within-child partner effect varies across partner categories. This extends `m_partner_slope` (which estimates a single age-by-partner_type moderation) to a full three-way interaction.
+
+```{r part2-three-way}
+m_three_way <- lmer(
+  child_emo_rate ~
+    partner_emo_within * ns(target_child_age_yrs, df = 3) * partner_type +
+    partner_emo_between +
+    target_child_sex +
+    (1 + partner_emo_within | target_child_id),
+  data    = transcript_dyadic,
+  REML    = TRUE,
+  control = lmerControl(optimizer = "bobyqa")
+)
+
+summary(m_three_way)
+
+# LRT: does the three-way interaction improve fit over the two-way partner × age model?
+m_base_ml <- lmer(
+  child_emo_rate ~
+    partner_emo_within * partner_type +
+    ns(target_child_age_yrs, df = 3) +
+    partner_emo_between +
+    target_child_sex +
+    (1 + partner_emo_within | target_child_id),
+  data    = transcript_dyadic,
+  REML    = FALSE,
+  control = lmerControl(optimizer = "bobyqa")
+)
+
+m_three_way_ml <- update(m_three_way, REML = FALSE)
+
+anova(m_base_ml, m_three_way_ml)
+```
+
+------------------------------------------------------------------------
+
+## 15b. Subsample representativeness check
+
+Compares the analytic sample (`transcript_all`, after applying token filters) against the excluded transcripts (in `utt` but not retained) on child age distribution, sex ratio, and emotion word rates.
+
+```{r subsample-comparison}
+# Build full-census transcript-level frame from utt (before token filters)
+transcript_census <- utt %>%
+  mutate(speaker_category = if_else(role_category == "Target Child", "child", "partner")) %>%
+  group_by(transcript_id, speaker_category) %>%
+  summarise(
+    total_tokens  = sum(num_tokens,    na.rm = TRUE),
+    total_emotion = sum(emotion_count, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(emo_rate = if_else(total_tokens > 0, total_emotion / total_tokens, NA_real_)) %>%
+  pivot_wider(
+    id_cols     = transcript_id,
+    names_from  = speaker_category,
+    values_from = c(emo_rate, total_tokens)
+  ) %>%
+  rename(
+    child_emo_rate   = emo_rate_child,
+    partner_emo_rate = emo_rate_partner,
+    child_tokens     = total_tokens_child,
+    partner_tokens   = total_tokens_partner
+  ) %>%
+  left_join(age_lookup, by = "transcript_id") %>%
+  mutate(target_child_age_yrs = target_child_age / 12) %>%
+  filter(!is.na(target_child_age_yrs), !is.na(child_emo_rate), !is.na(partner_emo_rate)) %>%
+  mutate(in_sample = transcript_id %in% transcript_all$transcript_id)
+
+cat("Full census transcripts: ", nrow(transcript_census), "\n")
+cat("Analytic sample:         ", sum(transcript_census$in_sample), "\n")
+cat("Excluded:                ", sum(!transcript_census$in_sample), "\n\n")
+
+# 1. Age distribution
+age_in  <- transcript_census %>% filter( in_sample) %>% pull(target_child_age_yrs)
+age_out <- transcript_census %>% filter(!in_sample) %>% pull(target_child_age_yrs)
+age_t   <- t.test(age_in, age_out)
+age_ks  <- ks.test(age_in, age_out)
+cat(sprintf("Age (years) — In: M = %.2f (SD = %.2f) | Out: M = %.2f (SD = %.2f)\n",
+            mean(age_in), sd(age_in), mean(age_out), sd(age_out)))
+cat(sprintf("  t-test: t = %.3f, df = %.1f, p = %.4f\n",
+            age_t$statistic, age_t$parameter, age_t$p.value))
+cat(sprintf("  KS test: D = %.3f, p = %.4f\n\n", age_ks$statistic, age_ks$p.value))
+
+# 2. Sex ratio
+sex_contingency <- table(
+  in_sample = transcript_census$in_sample,
+  sex       = transcript_census$target_child_sex
+)
+print(sex_contingency)
+sex_chi <- chisq.test(sex_contingency)
+cat(sprintf("\nSex χ²(%d) = %.3f, p = %.4f\n\n",
+            sex_chi$parameter, sex_chi$statistic, sex_chi$p.value))
+
+# 3. Emotion word rates
+emo_child_in  <- transcript_census %>% filter( in_sample) %>% pull(child_emo_rate)
+emo_child_out <- transcript_census %>% filter(!in_sample) %>% pull(child_emo_rate)
+emo_part_in   <- transcript_census %>% filter( in_sample) %>% pull(partner_emo_rate)
+emo_part_out  <- transcript_census %>% filter(!in_sample) %>% pull(partner_emo_rate)
+
+ct_child <- t.test(emo_child_in,  emo_child_out)
+ct_part  <- t.test(emo_part_in,   emo_part_out)
+
+cat(sprintf("Child emo rate — In: %.5f | Out: %.5f | t = %.3f, p = %.4f\n",
+            mean(emo_child_in, na.rm=TRUE), mean(emo_child_out, na.rm=TRUE),
+            ct_child$statistic, ct_child$p.value))
+cat(sprintf("Partner emo rate — In: %.5f | Out: %.5f | t = %.3f, p = %.4f\n",
+            mean(emo_part_in, na.rm=TRUE), mean(emo_part_out, na.rm=TRUE),
+            ct_part$statistic, ct_part$p.value))
+```
+
+------------------------------------------------------------------------
+
 ## 15. Save
 
 ```{r save}
@@ -568,5 +811,5 @@ saveRDS(transcript_dyadic,  here("01Data", "02Derived", "additional_dyadic.rds")
 saveRDS(m_mod,              here("01Data", "02Derived", "additional_mod_model.rds"))
 saveRDS(m_partner_level,    here("01Data", "02Derived", "additional_partner_level_model.rds"))
 saveRDS(m_partner_slope,    here("01Data", "02Derived", "additional_partner_slope_model.rds"))
+saveRDS(m_three_way,        here("01Data", "02Derived", "additional_three_way_model.rds"))
 ```
-

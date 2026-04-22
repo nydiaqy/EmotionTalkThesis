@@ -211,9 +211,9 @@ crqa_series_f %>%
   summarise(
     n_transcripts = n_distinct(transcript_id),
     n_children    = n_distinct(target_child_id)
-  )%>%
-  
- crqa_series_f %>%
+  )
+
+crqa_series_f %>%
   summarise(
     min_age_months = min(target_child_age, na.rm = TRUE),
     max_age_months = max(target_child_age, na.rm = TRUE),
@@ -380,6 +380,54 @@ m_rq2 <- lmer(
 summary(m_rq2)
 ```
 
+### 10b-ii. Paired t-tests by developmental stage
+
+Rationale: the overall paired test (10a) collapses all ages. Here we test whether observed wRR \> shuffled wRR WITHIN each of three broad developmental windows, using the same paired design. Stage boundaries follow convention in developmental psycholinguistics: Early = 0–3 yrs (pre-school, emergent language), Middle = 3–7 yrs (school-entry, rapid vocabulary growth), Late = 7–12 yrs (school-age).
+
+```{r rq2-stage-tests}
+crqa_data_stages <- crqa_data %>%
+  filter(!is.na(target_child_age_yrs)) %>%
+  mutate(
+    dev_stage = case_when(
+      target_child_age_yrs <  3 ~ "Early (0\u20133 yrs)",
+      target_child_age_yrs <  7 ~ "Middle (3\u20137 yrs)",
+      TRUE                      ~ "Late (7\u201312 yrs)"
+    ),
+    dev_stage = factor(dev_stage,
+                       levels = c("Early (0\u20133 yrs)",
+                                  "Middle (3\u20137 yrs)",
+                                  "Late (7\u201312 yrs)"))
+  )
+
+stage_wrr_tests <- crqa_data_stages %>%
+  group_by(dev_stage) %>%
+  filter(!is.na(wRR), !is.na(wRR_shuf)) %>%
+  summarise(
+    n           = n(),
+    mean_obs    = round(mean(wRR),            5),
+    mean_shuf   = round(mean(wRR_shuf),       5),
+    mean_excess = round(mean(wRR - wRR_shuf), 5),
+    t_stat      = t.test(wRR, wRR_shuf, paired = TRUE,
+                         alternative = "greater")$statistic,
+    df          = t.test(wRR, wRR_shuf, paired = TRUE,
+                         alternative = "greater")$parameter,
+    p_value     = t.test(wRR, wRR_shuf, paired = TRUE,
+                         alternative = "greater")$p.value,
+    .groups     = "drop"
+  ) %>%
+  mutate(
+    p_adj = p.adjust(p_value, method = "fdr"),
+    sig   = case_when(
+      p_adj < 0.001 ~ "***",
+      p_adj < 0.01  ~ "**",
+      p_adj < 0.05  ~ "*",
+      TRUE          ~ "n.s."
+    )
+  )
+
+print(stage_wrr_tests %>% mutate(across(where(is.numeric), ~ round(.x, 5))))
+```
+
 ### 10c. Distribution plot
 
 ```{r rq2-dist-plot}
@@ -446,12 +494,53 @@ ggplot(crqa_data_long, aes(x = target_child_age_yrs, y = value,
 ### 11a. Is there a directional bias?
 
 ```{r rq3-test}
-t.test(crqa_data$asymmetry_corrected, mu = 0)
+# Overall paired test: observed asymmetry vs. shuffled asymmetry
+# Directly compares the observed AI (RR_pos − RR_neg on real data) against the
+# shuffled AI (same formula applied to shuffled series), avoiding reliance on
+# the "corrected" difference metric.
+t.test(crqa_data$asymmetry, crqa_data$asymmetry_shuf,
+       paired = TRUE)
+# Note: two-sided because we have no directional prediction about the overall
+# sample; use alternative = "greater" if theory predicts child leads on average.
+```
+
+### 11a NEW: Paired t-tests by developmental stage
+
+Same logic as 10b-ii: test whether observed AI differs from shuffled AI within each developmental window. Uses `crqa_data_stages` created in Section 10b-ii.
+
+```{r rq3-stage-tests}
+stage_ai_tests <- crqa_data_stages %>%
+  group_by(dev_stage) %>%
+  filter(!is.na(asymmetry), !is.na(asymmetry_shuf)) %>%
+  summarise(
+    n            = n(),
+    mean_obs_ai  = round(mean(asymmetry),                    6),
+    mean_shuf_ai = round(mean(asymmetry_shuf),               6),
+    mean_diff    = round(mean(asymmetry - asymmetry_shuf),   6),
+    t_stat       = t.test(asymmetry, asymmetry_shuf,
+                          paired = TRUE)$statistic,
+    df           = t.test(asymmetry, asymmetry_shuf,
+                          paired = TRUE)$parameter,
+    p_value      = t.test(asymmetry, asymmetry_shuf,
+                          paired = TRUE)$p.value,
+    .groups      = "drop"
+  ) %>%
+  mutate(
+    p_adj = p.adjust(p_value, method = "fdr"),
+    sig   = case_when(
+      p_adj < 0.001 ~ "***",
+      p_adj < 0.01  ~ "**",
+      p_adj < 0.05  ~ "*",
+      TRUE          ~ "n.s."
+    )
+  )
+
+print(stage_ai_tests %>% mutate(across(where(is.numeric), ~ round(.x, 6))))
 ```
 
 ### 11a-ii. Age-block t-tests — does direction shift across development?
 
-A non-significant overall test may mask a developmental reversal: child-leading at younger ages cancelling out partner-leading at older ages (or vice versa). We split the sample into 1-year age bins and run a one-sample t-test against μ = 0 within each bin. P-values are FDR-adjusted across blocks.
+A non-significant overall test may mask a developmental reversal: child-leading at younger ages cancelling out partner-leading at older ages (or vice versa). We split the sample into 1-year age bins and run a one-sample t-test against μ = 0 within each bin. P-values are FDR-adjusted across blocks. The plot shows both observed AI and shuffled AI means per block on the same panel with 95% CI error bars.
 
 ```{r rq3-age-block-tests}
 crqa_data_blocks <- crqa_data %>%
@@ -465,6 +554,30 @@ crqa_data_blocks <- crqa_data %>%
     right          = FALSE
   ))
 
+# Summarise both observed and shuffled AI per block
+block_ai_long <- crqa_data_blocks %>%
+  filter(!is.na(asymmetry_shuf)) %>%
+  group_by(age_block) %>%
+  filter(n() >= 10) %>%
+  pivot_longer(
+    cols      = c(asymmetry, asymmetry_shuf),
+    names_to  = "condition",
+    values_to = "ai"
+  ) %>%
+  mutate(
+    condition = if_else(condition == "asymmetry", "Observed", "Shuffled")
+  ) %>%
+  group_by(age_block, condition) %>%
+  summarise(
+    n        = n(),
+    mean_ai  = mean(ai, na.rm = TRUE),
+    se_ai    = sd(ai, na.rm = TRUE) / sqrt(n()),
+    ci_low   = mean_ai - qt(0.975, df = n() - 1) * se_ai,
+    ci_high  = mean_ai + qt(0.975, df = n() - 1) * se_ai,
+    .groups  = "drop"
+  )
+
+# Per-block one-sample t-tests (unchanged)
 block_tests <- crqa_data_blocks %>%
   group_by(age_block) %>%
   filter(n() >= 10) %>%          # require at least 10 transcripts per block
@@ -489,35 +602,49 @@ block_tests <- crqa_data_blocks %>%
     )
   )
 
-print(block_tests %>%
-        mutate(across(where(is.numeric), ~ round(.x, 4))))
+print(block_tests %>% mutate(across(where(is.numeric), ~ round(.x, 4))))
 
-# Plot: mean asymmetry per age block with 95% CI and significance label
-ggplot(block_tests, aes(x = age_block, y = mean_asym)) +
+# Plot: observed AND shuffled AI per age block on same panel
+ggplot(block_ai_long,
+       aes(x = age_block, y = mean_ai,
+           colour = condition, group = condition)) +
   geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
-  geom_pointrange(aes(ymin = ci_low, ymax = ci_high, colour = sig),
-                  linewidth = 0.8, fatten = 3) +
-  geom_text(aes(label = sig, y = ci_high), vjust = -0.5, size = 4) +
-  scale_colour_manual(
-    values = c("***" = "#c0392b", "**" = "#e67e22",
-               "*"   = "#27ae60", "n.s." = "grey60"),
-    drop = FALSE
+  geom_pointrange(
+    aes(ymin = ci_low, ymax = ci_high),
+    position = position_dodge(width = 0.5),
+    linewidth = 0.7, size = 0.6
   ) +
+  geom_line(
+    aes(linetype = condition),
+    position = position_dodge(width = 0.5),
+    linewidth = 0.6
+  ) +
+  scale_colour_manual(values = c("Observed" = "#2980b9", "Shuffled" = "grey60")) +
+  scale_linetype_manual(values = c("Observed" = "solid",  "Shuffled" = "dotted")) +
   labs(
-    title    = "Mean corrected asymmetry by 1-year age block",
-    subtitle = "Positive = child leads | Negative = partner leads\nError bars = 95% CI  |  FDR-adjusted significance",
-    x = "Child age (years)", y = "Mean corrected asymmetry",
-    colour = NULL
+    title    = "Asymmetry index (AI) by 1-year age block",
+    subtitle = paste0(
+      "Observed (blue) vs. shuffled baseline (grey)  |  Positive = child leads\n",
+      "Error bars = 95% CI  |  Point dodge = 0.5 to avoid overlap"
+    ),
+    x      = "Child age (years)",
+    y      = "Mean asymmetry index (RR_pos \u2212 RR_neg)",
+    colour = NULL, linetype = NULL
   ) +
   theme_minimal(base_size = 12) +
-  theme(legend.position = "top", axis.text.x = element_text(angle = 30, hjust = 1))
+  theme(
+    legend.position = "top",
+    axis.text.x     = element_text(angle = 30, hjust = 1)
+  )
 ```
 
 ### 11b. Does directionality vary with child age?
 
+Predicts the RAW observed asymmetry (rather than `asymmetry_corrected`), so both the response and plots remain on the original AI scale (RR_pos − RR_neg). An optional controlled model includes the shuffled AI as a covariate to partial out base-rate contributions at the model level rather than by subtraction.
+
 ```{r rq3-model}
 m_rq3 <- lmer(
-  asymmetry_corrected ~
+  asymmetry ~
     ns(target_child_age_yrs, df = 3) +
     target_child_sex +
     (1 | target_child_id),
@@ -525,6 +652,32 @@ m_rq3 <- lmer(
   REML    = TRUE
 )
 summary(m_rq3)
+
+# Optional: include shuffled AI as a covariate to remove base-rate confound
+# at the model level rather than by subtraction
+m_rq3_controlled <- lmer(
+  asymmetry ~
+    asymmetry_shuf +                       # base-rate covariate
+    ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 | target_child_id),
+  data    = crqa_data,
+  REML    = TRUE
+)
+summary(m_rq3_controlled)
+
+# Plot: predicted observed AI across age (from m_rq3), 95% CI shaded
+pred_asym <- ggpredict(m_rq3, terms = "target_child_age_yrs [all]")
+
+plot(pred_asym) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  labs(
+    title    = "Predicted asymmetry index by child age",
+    subtitle = "Mixed model: asymmetry ~ ns(age, df=3) + sex + (1|child_id)  |  shading = 95% CI",
+    x        = "Child age (years)",
+    y        = "Predicted asymmetry index (AI)"
+  ) +
+  theme_minimal(base_size = 12)
 ```
 
 ### 11c. Mean recurrence profile across all transcripts
@@ -1086,3 +1239,60 @@ ggplot(emm_all,
 ```{r save-dyadic}
 saveRDS(crqa_data_dyadic,    here("01Data", "02Derived", "crqa_dyadic_results.rds"))
 ```
+
+------------------------------------------------------------------------
+
+## 19. Sensitivity analysis — window size
+
+To verify that findings are not an artefact of the window-size choice, the key RQ2 and RQ3 statistics are recomputed across candidate windows W − 2, W − 1, W (primary), W + 1, and W + 2. For each candidate W, the same length filter (`n_aligned > W`) is applied, so transcript counts may differ slightly. Results are considered robust if RQ2 remains significant (p \< .05) and the direction and approximate magnitude of the corrected asymmetry (RQ3) are stable across the range.
+
+```{r sensitivity-window}
+candidate_Ws <- (WINDOW_W - 2):(WINDOW_W + 2)
+candidate_Ws <- candidate_Ws[candidate_Ws >= 1]   # W must be at least 1
+
+set.seed(42)
+
+sensitivity_results <- map_dfr(candidate_Ws, function(W_cand) {
+
+  series_w <- crqa_series %>% filter(n_aligned > W_cand)
+
+  obs <- map_dfr(seq_len(nrow(series_w)), function(i) {
+    cs <- unlist(series_w$child_series[[i]])
+    ps <- unlist(series_w$partner_series[[i]])
+    na <- series_w$n_aligned[i]
+    recurrence_profile(cs[1:na], ps[1:na], W = W_cand) %>% summarise_crqa()
+  })
+
+  shuf <- map_dfr(seq_len(nrow(series_w)), function(i) {
+    cs_s <- sample(unlist(series_w$child_series[[i]]))
+    ps   <- unlist(series_w$partner_series[[i]])
+    na   <- series_w$n_aligned[i]
+    recurrence_profile(cs_s[1:na], ps[1:na], W = W_cand) %>%
+      summarise_crqa() %>%
+      rename(wRR_shuf = wRR, asymmetry_shuf = asymmetry) %>%
+      dplyr::select(wRR_shuf, asymmetry_shuf)
+  })
+
+  d   <- bind_cols(obs, shuf)
+  rq2 <- t.test(d$wRR,       d$wRR_shuf,       paired = TRUE, alternative = "greater")
+  rq3 <- t.test(d$asymmetry, d$asymmetry_shuf, paired = TRUE)
+
+  tibble(
+    W               = W_cand,
+    primary         = (W_cand == WINDOW_W),
+    n_transcripts   = nrow(d),
+    mean_wRR_obs    = round(mean(d$wRR),                          5),
+    mean_wRR_excess = round(mean(d$wRR - d$wRR_shuf),             5),
+    rq2_t           = round(rq2$statistic,                        3),
+    rq2_p           = round(rq2$p.value,                          4),
+    mean_asym_obs   = round(mean(d$asymmetry),                    6),
+    mean_asym_corr  = round(mean(d$asymmetry - d$asymmetry_shuf), 6),
+    rq3_t           = round(rq3$statistic,                        3),
+    rq3_p           = round(rq3$p.value,                          4)
+  )
+})
+
+print(sensitivity_results)
+```
+
+`primary = TRUE` marks the window used in the main analysis (W = `r WINDOW_W` turns). Columns: `mean_wRR_excess` = mean observed minus shuffled wRR (RQ2 effect size); `mean_asym_corr` = mean corrected asymmetry index (RQ3 effect size).
