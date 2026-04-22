@@ -592,8 +592,7 @@ m_partner_level <- lmer(
     ns(target_child_age_yrs, df = 3) +
     target_child_sex +
     (1 | corpus_name) +
-    (1 | target_child_id) +
-    (1 | transcript_id),
+    (1 | target_child_id),
   data    = transcript_dyadic,
   REML    = TRUE,
   control = lmerControl(optimizer = "bobyqa")
@@ -633,8 +632,7 @@ m_partner_slope <- lmer(
     ns(target_child_age_yrs, df = 3) +
     target_child_sex +
     (1 | corpus_name) +
-    (1 + partner_emo_within | target_child_id) +
-    (1 | transcript_id),
+    (1 + partner_emo_within | target_child_id),
   data    = transcript_dyadic,
   REML    = TRUE,
   control = lmerControl(optimizer = "bobyqa")
@@ -650,8 +648,7 @@ m_partner_slope_noint <- lmer(
     ns(target_child_age_yrs, df = 3) +
     target_child_sex +
     (1 | corpus_name) +
-    (1 + partner_emo_within | target_child_id) +
-    (1 | transcript_id),
+    (1 + partner_emo_within | target_child_id),
   data    = transcript_dyadic,
   REML    = FALSE,
   control = lmerControl(optimizer = "bobyqa")
@@ -801,8 +798,7 @@ m_three_way <- lmer(
     partner_emo_between +
     target_child_sex +
     (1 | corpus_name) +
-    (1 + partner_emo_within | target_child_id) +
-    (1 | transcript_id),
+    (1 + partner_emo_within | target_child_id),
   data    = transcript_dyadic,
   REML    = TRUE,
   control = lmerControl(optimizer = "bobyqa")
@@ -818,8 +814,7 @@ m_base_ml <- lmer(
     partner_emo_between +
     target_child_sex +
     (1 | corpus_name) +
-    (1 + partner_emo_within | target_child_id) +
-    (1 | transcript_id),
+    (1 + partner_emo_within | target_child_id),
   data    = transcript_dyadic,
   REML    = FALSE,
   control = lmerControl(optimizer = "bobyqa")
