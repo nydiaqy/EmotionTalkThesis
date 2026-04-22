@@ -11,6 +11,7 @@ source(here::here("00_setup.R"))
 library(lme4)
 library(splines)
 library(glmmTMB)
+library(mice)
 ```
 
 Load cleaned dataset
@@ -158,9 +159,64 @@ miss_by_corpus <- utt_model_df %>%
   arrange(desc(pct_miss_sex))
 print(miss_by_corpus)
 
+# --- Sex imputation (following Jia & Wu, 2022; consistent with PI's approach) ---
+# Age is NOT imputed: missingness is structural (several corpora never recorded age),
+# and age is the primary developmental predictor — imputing it risks fabricating
+# the key axis of analysis. Transcripts missing age are excluded (n = XX).
+#
+# Sex is imputed via multilevel predictive mean matching with chained equations
+# (50 iterations, 10 complete datasets), with corpus_name as a cluster variable.
+
+# Step 1: build transcript-level frame for imputation (one row per transcript)
+impute_frame <- utt_model_df %>%
+  filter(num_tokens > 0, !is.na(target_child_age)) %>%   # exclude missing age first
+  distinct(transcript_id, corpus_name, target_child_id,
+           target_child_age, target_child_sex) %>%
+  mutate(
+    target_child_sex = factor(target_child_sex),
+    corpus_name      = factor(corpus_name)
+  )
+
+cat(sprintf("Transcripts available for imputation: %d\n",   nrow(impute_frame)))
+cat(sprintf("  of which missing sex: %d (%.1f%%)\n",
+    sum(is.na(impute_frame$target_child_sex)),
+    mean(is.na(impute_frame$target_child_sex)) * 100))
+
+# Step 2: impute with mice (2l.pmm uses cluster = corpus_name for multilevel PMM)
+set.seed(2024)
+imp <- mice(
+  impute_frame %>% select(target_child_sex, target_child_age, corpus_name),
+  method    = "pmm",          # predictive mean matching for binary factor
+  m         = 10,             # 10 complete datasets
+  maxit     = 50,             # 50 iterations
+  printFlag = FALSE
+)
+
+# Step 3: pool — take modal imputed sex per transcript across 10 datasets
+imputed_sex <- lapply(1:10, function(i) complete(imp, i)$target_child_sex)
+modal_sex <- apply(do.call(cbind, lapply(imputed_sex, as.integer)), 1,
+                   function(x) names(which.max(table(x))))
+modal_sex <- ifelse(modal_sex == "1", levels(impute_frame$target_child_sex)[1],
+                                      levels(impute_frame$target_child_sex)[2])
+
+impute_frame$target_child_sex_imp <- ifelse(
+  is.na(impute_frame$target_child_sex),
+  modal_sex,
+  as.character(impute_frame$target_child_sex)
+)
+
+cat(sprintf("Transcripts retained after sex imputation: %d\n", nrow(impute_frame)))
+
+# Step 4: merge imputed sex back and apply filters
 utt_model_df_rq1 <- utt_model_df %>%
-  filter(num_tokens > 0) %>%
-  filter(!is.na(target_child_age), !is.na(target_child_sex))
+  filter(num_tokens > 0, !is.na(target_child_age)) %>%
+  left_join(
+    impute_frame %>% select(transcript_id, target_child_sex_imp),
+    by = "transcript_id"
+  ) %>%
+  mutate(target_child_sex = target_child_sex_imp) %>%
+  select(-target_child_sex_imp) %>%
+  filter(!is.na(target_child_sex))
 
 ```
 
