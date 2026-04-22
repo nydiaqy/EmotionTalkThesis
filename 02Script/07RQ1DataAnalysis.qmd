@@ -68,6 +68,7 @@ write.csv(
 ```
 
 By Role
+
 ```{r}
 total_emotion_words_by_role_merged <- utt_partners_emotions_merged %>%
   group_by(role_category) %>%
@@ -110,7 +111,8 @@ write.csv(
   row.names = FALSE
 )
 ```
-Prep Dataset for RQ1 
+
+Prep Dataset for RQ1
 
 ```{r}
 utt_model_df <- utt_partners_emotions_merged %>%
@@ -141,7 +143,9 @@ utt_model_df_rq1 <- utt_model_df %>%
  filter(!is.na(target_child_age), !is.na(target_child_sex))
 
 ```
+
 ### prep transcript-level dataset
+
 ```{r}
 transcript_id <- "transcript_id"
 
@@ -170,10 +174,11 @@ m_tr_nb <- glmmTMB(
   family = nbinom2(),
   data = df_tr
 )
-m_tr_nb
+summary(m_tr_nb)
 ```
 
 ### prediction and plotting
+
 ```{r}
 # observed age range
 age_min_m <- min(df_tr$target_child_age, na.rm = TRUE)
