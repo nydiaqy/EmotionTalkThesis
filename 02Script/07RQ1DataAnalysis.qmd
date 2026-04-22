@@ -4,14 +4,6 @@ format: html
 editor: visual
 ---
 
-```{r setup, include=FALSE}
- knitr::opts_chunk$set( echo = FALSE,    # hide code by default
-                        message = FALSE,  # hide messages
-                        warning = FALSE   # hide warnings
-                        )
-
-```
-
 Prep work space and load packages
 
 ```{r}
@@ -134,12 +126,41 @@ utt_model_df <- utt_partners_emotions_merged %>%
     num_tokens
   )
 
-utt_model_df %>%
-count(!is.na(target_child_sex), !is.na(target_child_age))
+# --- Missing data diagnostics ---
+# How many unique transcripts are affected by each source of missingness?
+n_total <- n_distinct(utt_model_df$transcript_id)
+
+miss_diag <- utt_model_df %>%
+  distinct(transcript_id, target_child_age, target_child_sex) %>%
+  summarise(
+    n_transcripts        = n_distinct(transcript_id),
+    missing_age          = sum(is.na(target_child_age)),
+    missing_sex          = sum(is.na(target_child_sex)),
+    missing_age_only     = sum( is.na(target_child_age) & !is.na(target_child_sex)),
+    missing_sex_only     = sum(!is.na(target_child_age) &  is.na(target_child_sex)),
+    missing_both         = sum( is.na(target_child_age) &  is.na(target_child_sex)),
+    pct_missing_age      = round(mean(is.na(target_child_age)) * 100, 1),
+    pct_missing_sex      = round(mean(is.na(target_child_sex)) * 100, 1)
+  )
+print(miss_diag)
+
+# Which corpora drive the missingness?
+miss_by_corpus <- utt_model_df %>%
+  distinct(transcript_id, corpus_name, target_child_age, target_child_sex) %>%
+  group_by(corpus_name) %>%
+  summarise(
+    n          = n(),
+    pct_miss_age = round(mean(is.na(target_child_age)) * 100, 1),
+    pct_miss_sex = round(mean(is.na(target_child_sex)) * 100, 1),
+    .groups = "drop"
+  ) %>%
+  filter(pct_miss_age > 0 | pct_miss_sex > 0) %>%
+  arrange(desc(pct_miss_sex))
+print(miss_by_corpus)
 
 utt_model_df_rq1 <- utt_model_df %>%
-  filter(num_tokens > 0) %>% 
- filter(!is.na(target_child_age), !is.na(target_child_sex))
+  filter(num_tokens > 0) %>%
+  filter(!is.na(target_child_age), !is.na(target_child_sex))
 
 ```
 
