@@ -5,10 +5,9 @@ editor: visual
 ---
 
 ```{r setup, include=FALSE}
- knitr::opts_chunk$set( echo = FALSE, # hide code by default 
-                        message = FALSE, # hide messages 
-                        warning = FALSE, # hide warnings 
-                        results = "hide" # hide printed output from code 
+ knitr::opts_chunk$set( echo = FALSE,    # hide code by default
+                        message = FALSE,  # hide messages
+                        warning = FALSE   # hide warnings
                         )
 
 ```
