@@ -120,13 +120,14 @@ utt_model_df <- utt_partners_emotions_merged %>%
     target_child_id,
     speaker_id,
     corpus_id,
+    corpus_name,
     transcript_id,
-    
+
     # predictors
     role_category,
     target_child_age,
     target_child_sex,
-    
+
     # outcome / exposure
     emotion_count,
     num_tokens
@@ -147,6 +148,7 @@ transcript_id <- "transcript_id"
 df_tr <- utt_model_df_rq1 %>%
   group_by(
     !!sym(transcript_id),
+    corpus_name,
     target_child_id,
     role_category,
     target_child_age,
@@ -164,7 +166,7 @@ m_tr_nb <- glmmTMB(
     role_category * ns(target_child_age, df = 3) +
     target_child_sex +
     offset(log(num_tokens)) +
-    (1 | target_child_id),
+    (1 | corpus_name/target_child_id),
   family = nbinom2(),
   data = df_tr
 )

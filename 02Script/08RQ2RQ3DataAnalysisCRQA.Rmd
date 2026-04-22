@@ -335,6 +335,7 @@ age_lookup <- utt %>%
     target_child_age = first(target_child_age),
     target_child_sex = first(target_child_sex),
     target_child_id  = first(target_child_id),
+    corpus_name      = first(corpus_name),
     .groups = "drop"
   )
 
@@ -373,6 +374,7 @@ m_rq2 <- lmer(
   wRR_excess ~
     ns(target_child_age_yrs, df = 3) +
     target_child_sex +
+    (1 | corpus_name) +
     (1 | target_child_id),
   data    = crqa_data,
   REML    = TRUE
@@ -647,6 +649,7 @@ m_rq3 <- lmer(
   asymmetry ~
     ns(target_child_age_yrs, df = 3) +
     target_child_sex +
+    (1 | corpus_name) +
     (1 | target_child_id),
   data    = crqa_data,
   REML    = TRUE
@@ -660,6 +663,7 @@ m_rq3_controlled <- lmer(
     asymmetry_shuf +                       # base-rate covariate
     ns(target_child_age_yrs, df = 3) +
     target_child_sex +
+    (1 | corpus_name) +
     (1 | target_child_id),
   data    = crqa_data,
   REML    = TRUE
@@ -1139,6 +1143,7 @@ m_partner_wrr <- lmer(
   wRR_excess ~
     partner_type * ns(target_child_age_yrs, df = 3) +
     target_child_sex +
+    (1 | corpus_name) +
     (1 | target_child_id),
   data = crqa_data_dyadic,
   REML = TRUE
@@ -1151,6 +1156,7 @@ m_partner_wrr_noint <- lmer(
     partner_type +
     ns(target_child_age_yrs, df = 3) +
     target_child_sex +
+    (1 | corpus_name) +
     (1 | target_child_id),
   data = crqa_data_dyadic,
   REML = FALSE
@@ -1159,6 +1165,7 @@ m_partner_wrr_int <- lmer(
   wRR_excess ~
     partner_type * ns(target_child_age_yrs, df = 3) +
     target_child_sex +
+    (1 | corpus_name) +
     (1 | target_child_id),
   data = crqa_data_dyadic,
   REML = FALSE
@@ -1193,6 +1200,7 @@ m_partner_asym <- lmer(
     partner_type +
     ns(target_child_age_yrs, df = 3) +
     target_child_sex +
+    (1 | corpus_name) +
     (1 | target_child_id),
   data = crqa_data_dyadic,
   REML = TRUE
