@@ -170,7 +170,7 @@ m_tr_nb <- glmmTMB(
     role_category * ns(target_child_age, df = 3) +
     target_child_sex +
     offset(log(num_tokens)) +
-    (1 | corpus_name/target_child_id),
+    (1 | corpus_name/target_child_id/transcript_id),
   family = nbinom2(),
   data = df_tr
 )
