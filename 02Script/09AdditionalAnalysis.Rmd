@@ -21,7 +21,7 @@ Two sections are reported:
 ## 0. Setup
 
 ```{r setup, message=FALSE, warning=FALSE}
-source(here::here("00_setup.R"))
+source("00_setup.R")
 library(lme4)
 library(lmerTest)
 library(splines)
@@ -37,6 +37,10 @@ library(ggeffects)
 
 ```{r load}
 utt <- readRDS(here("01Data", "02Derived", "FINAL_utt_RQ1_emotions_merged.rds"))
+
+# Apply the same corpus exclusions as all other analysis scripts
+EXCLUDE_CORPORA <- c("Feldman", "Peters")
+utt <- utt %>% filter(!corpus_name %in% EXCLUDE_CORPORA)
 
 cat("Rows:        ", nrow(utt), "\n")
 cat("Transcripts: ", n_distinct(utt$transcript_id), "\n")
@@ -175,7 +179,39 @@ transcript_all %>%
     partner_emo_sd   = round(sd(partner_emo_rate),       4)
   ) %>% print()
 
-cor.test(transcript_all$child_emo_rate, transcript_all$partner_emo_rate)
+cor_res <- cor.test(transcript_all$child_emo_rate, transcript_all$partner_emo_rate)
+print(cor_res)
+
+cat(sprintf(
+  "\nr = %.2f, 95%% CI [%.2f, %.2f], t(%d) = %.2f, p %s\n",
+  cor_res$estimate,
+  cor_res$conf.int[1],
+  cor_res$conf.int[2],
+  cor_res$parameter,
+  cor_res$statistic,
+  ifelse(cor_res$p.value < .001, "< .001", sprintf("= %.3f", cor_res$p.value))
+))
+```
+
+```{r part1-scatter}
+ggplot(transcript_all, aes(x = partner_emo_rate, y = child_emo_rate)) +
+  geom_point(alpha = 0.20, size = 1, colour = "steelblue") +
+  geom_smooth(method = "lm", colour = "firebrick", linewidth = 1,
+              fill = "firebrick", alpha = 0.15) +
+  annotate("text",
+           x = Inf, y = Inf, hjust = 1.1, vjust = 1.8,
+           label = sprintf("r = %.2f, p < .001", cor_res$estimate),
+           size = 4.5, fontface = "italic") +
+  labs(
+    title = "Transcript-Level Correlation between Partner and Child Emotion-Word Use",
+    x     = "Partner Emotion-Word Rate (proportion of utterances)",
+    y     = "Child Emotion-Word Rate (proportion of utterances)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title       = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
 ```
 
 ------------------------------------------------------------------------
@@ -199,6 +235,7 @@ transcript_all <- transcript_all %>%
 ### 6a. Fit model
 
 ```{r part1-mod-model}
+# ── REML fit for final estimates and simple slopes ────────────────────────────
 m_mod <- lmer(
   child_emo_rate ~
     partner_emo_within  * ns(target_child_age_yrs, df = 3) +
@@ -217,7 +254,20 @@ summary(m_mod)
 ### 6b. Test within × age interaction
 
 ```{r part1-mod-anova}
-m_mod_noint <- lmer(
+# ── Both models fitted with REML = FALSE for a valid LRT ─────────────────────
+m_mod_ml <- lmer(
+  child_emo_rate ~
+    partner_emo_within  * ns(target_child_age_yrs, df = 3) +
+    partner_emo_between * ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 | corpus_name) +
+    (1 + partner_emo_within | target_child_id),
+  data    = transcript_all,
+  REML    = FALSE,
+  control = lmerControl(optimizer = "bobyqa")
+)
+
+m_mod_noint_ml <- lmer(
   child_emo_rate ~
     partner_emo_within +
     partner_emo_between * ns(target_child_age_yrs, df = 3) +
@@ -229,7 +279,7 @@ m_mod_noint <- lmer(
   control = lmerControl(optimizer = "bobyqa")
 )
 
-anova(m_mod_noint, update(m_mod, REML = FALSE))
+anova(m_mod_noint_ml, m_mod_ml)
 ```
 
 ### 6c. Simple slopes — partner effect at each age
@@ -272,8 +322,7 @@ ggplot(pred_mod, aes(x = x, y = predicted,
 Semi-partial R² for each term is estimated by nested model comparison: marginal R²m (fixed effects only) and conditional R²c (fixed + random effects) of the full model minus the same quantity from a model with that term removed (Nakagawa & Schielzeth, 2013; computed via `MuMIn::r.squaredGLMM()`). Models are refit with ML (REML = FALSE) for comparability.
 
 ```{r part1-partial-r2}
-# Refit models with ML for nested comparison
-m_mod_ml <- update(m_mod, REML = FALSE)
+# m_mod_ml and m_mod_noint_ml already fitted with REML = FALSE in chunk 6b
 
 # Without partner_emo_within (main effect + interaction removed; random slope simplified)
 m_no_within_ml <- lmer(
@@ -288,8 +337,8 @@ m_no_within_ml <- lmer(
   control = lmerControl(optimizer = "bobyqa")
 )
 
-# Without partner_emo_within × age interaction (main effect retained) — m_mod_noint exists
-m_no_int_ml <- update(m_mod_noint, REML = FALSE)
+# Without partner_emo_within × age interaction (main effect retained)
+m_no_int_ml <- m_mod_noint_ml   # already REML = FALSE from chunk 6b
 
 # Without partner_emo_between (main effect + interaction removed)
 m_no_between_ml <- lmer(
@@ -821,6 +870,124 @@ m_base_ml <- lmer(
 m_three_way_ml <- update(m_three_way, REML = FALSE)
 
 anova(m_base_ml, m_three_way_ml)
+```
+
+------------------------------------------------------------------------
+
+## 14d. Partner → child slopes per partner type at key ages — FULL SAMPLE (2, 4, 6, 8, 10 yrs)
+
+Uses the **full sample** (not restricted to dyadic transcripts). For each transcript, each partner type's emotion rate is computed separately from utterance-level data, producing one row per transcript × partner type. A Mundlak within/between decomposition is applied per child × partner type. A three-way model (`partner_emo_within × ns(age,3) × partner_type`) is then fitted on this long-format data, and `emtrends` extracts the partner → child slope at ages 2, 4, 6, 8, and 10 for each partner type.
+
+```{r part2-full-build}
+# Step 1: compute each partner type's emotion rate per transcript (full sample)
+# Restrict to the four main partner categories used throughout
+keep_types <- c("Mother", "Father", "Known Adult", "Other Adult")
+
+partner_rates_long <- utt %>%
+  filter(role_category %in% keep_types) %>%
+  group_by(transcript_id, role_category) %>%
+  summarise(
+    partner_tokens   = sum(num_tokens,    na.rm = TRUE),
+    partner_emotion  = sum(emotion_count, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(partner_tokens > 0) %>%
+  mutate(partner_emo_rate = partner_emotion / partner_tokens) %>%
+  rename(partner_type = role_category) %>%
+  # Join child info from transcript_all (already filtered & has child_emo_rate)
+  inner_join(
+    transcript_all %>%
+      dplyr::select(transcript_id, child_emo_rate, target_child_age_yrs,
+                    target_child_sex, corpus_name, target_child_id),
+    by = "transcript_id"
+  ) %>%
+  filter(!is.na(partner_emo_rate), !is.na(child_emo_rate),
+         !is.na(target_child_age_yrs)) %>%
+  mutate(
+    partner_type = factor(partner_type, levels = keep_types),
+    partner_type = relevel(partner_type, ref = "Mother")
+  )
+
+cat("Long-format rows:", nrow(partner_rates_long), "\n")
+cat("Transcripts:     ", n_distinct(partner_rates_long$transcript_id), "\n")
+cat("Children:        ", n_distinct(partner_rates_long$target_child_id), "\n")
+print(count(partner_rates_long, partner_type))
+```
+
+```{r part2-full-decompose}
+# Step 2: within-child × partner-type Mundlak decomposition
+partner_rates_long <- partner_rates_long %>%
+  group_by(target_child_id, partner_type) %>%
+  mutate(
+    partner_emo_between = mean(partner_emo_rate, na.rm = TRUE),
+    partner_emo_within  = partner_emo_rate - partner_emo_between
+  ) %>%
+  ungroup()
+```
+
+```{r part2-full-model}
+# Step 3: three-way model on full-sample long data
+m_three_way_full <- lmer(
+  child_emo_rate ~
+    partner_emo_within * ns(target_child_age_yrs, df = 3) * partner_type +
+    partner_emo_between +
+    target_child_sex +
+    (1 | corpus_name) +
+    (1 + partner_emo_within | target_child_id),
+  data    = partner_rates_long,
+  REML    = TRUE,
+  control = lmerControl(optimizer = "bobyqa")
+)
+
+summary(m_three_way_full)
+```
+
+```{r part2-full-slopes}
+# Step 4: slopes per partner type at ages 2, 4, 6, 8, 10
+# Call emtrends once per age value to avoid emm_list type-conflict issues.
+# Each call returns a plain emmGrid whose summary() gives a consistent data frame.
+slopes_by_age_full <- purrr::map_dfr(
+  c(2, 4, 6, 8, 10),
+  function(a) {
+    emtrends(
+      m_three_way_full,
+      specs = ~ partner_type,
+      var   = "partner_emo_within",
+      at    = list(target_child_age_yrs = a)
+    ) %>%
+      summary(infer = TRUE) %>%
+      as.data.frame() %>%
+      mutate(age = a)
+  }
+) %>%
+  rename(slope = partner_emo_within.trend) %>%
+  mutate(sig = if_else(p.value < 0.05, "sig", "n.s.", missing = "n.s."))
+
+print(slopes_by_age_full %>% mutate(across(where(is.numeric), ~ round(.x, 3))))
+```
+
+```{r part2-full-slopes-plot}
+# Step 5: plot
+ggplot(slopes_by_age_full %>% filter(!is.na(slope)),
+       aes(x = age, y = slope, colour = partner_type, group = partner_type)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_line(linewidth = 0.8) +
+  geom_pointrange(
+    aes(ymin = slope - 1.96 * SE, ymax = slope + 1.96 * SE, shape = sig),
+    linewidth = 0.6, fatten = 3,
+    position  = position_dodge(width = 0.3)
+  ) +
+  scale_x_continuous(breaks = c(2, 4, 6, 8, 10)) +
+  scale_shape_manual(values = c("sig" = 16, "n.s." = 1), guide = "none") +
+  labs(
+    title    = "Partner \u2192 child emotion-word slope by partner type and child age (full sample)",
+    subtitle = "Three-way interaction model  |  95% CI  |  filled point = CI excludes zero",
+    x        = "Child age (years)",
+    y        = "Slope (partner_emo_within \u2192 child_emo_rate)",
+    colour   = "Partner type"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top")
 ```
 
 ------------------------------------------------------------------------

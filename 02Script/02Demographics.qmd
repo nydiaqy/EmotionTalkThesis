@@ -30,11 +30,31 @@ head(ut_eng_na)
 
 ```
 
+Exclude corpora that do not meet inclusion criteria (data quality / scope). `d_eng_na`, `ut_eng_na`, and `d_target_child` are overwritten in place so that all downstream code runs on the filtered dataset without any further changes.
+
+Exclusion criteria: corpora involving clinical populations, including children with focal lesions (Feldman & Holland, 1989) and visual impairment (Wilson & Peters, 1988)
+
+```{r corpus-exclusion, echo=TRUE, results="show"}
+EXCLUDE_CORPORA <- c("Feldman",    
+                     "Peters")  
+
+d_eng_na  <- d_eng_na  %>% filter(!corpus_name %in% EXCLUDE_CORPORA)
+ut_eng_na <- ut_eng_na %>% filter(!corpus_name %in% EXCLUDE_CORPORA)
+
+cat(sprintf("\nAfter exclusion: %d transcripts | %d corpora\n",
+            n_distinct(d_eng_na$transcript_id),
+            n_distinct(d_eng_na$corpus_name)))
+```
+
 Load participant information: Number of Transcripts, transcripts, utterances by roles
 
 ```{r,echo=TRUE, results="show"}
-count_transcripts <- nrow(d_eng_na)
-count_transcripts
+ut_eng_na %>%
+  summarise(
+    n_corpora     = n_distinct(corpus_name),
+    n_transcripts = n_distinct(transcript_id),
+    n_children    = n_distinct(target_child_id)
+  )
 
 count_by_role <- ut_eng_na %>%
   group_by(speaker_role) %>%
@@ -51,6 +71,12 @@ count_by_role <- count_by_role %>%
     speaker_role = factor(speaker_role,
                           levels = speaker_role)
   )
+
+# Total number of distinct speaker roles (excluding target child)
+n_roles <- count_by_role %>%
+  filter(speaker_role != "Target_Child") %>%
+  nrow()
+n_roles
 
 count_by_role
 
@@ -89,13 +115,13 @@ Group 1: Mother (MOT)
 
 Group 2: Father (FAT)
 
-Group 3: Adult with existing relationship (ADT): Grandmother, Grandfather, Relative, Caretaker, Caregiver, Teacher
+Group 3: Adult with existing relationship (ADT): Teacher,Grandmother, Relative,Grandfather, Caretaker, Target_Adult
 
-Group 4: Siblings (SIB): Sister, Brother, Sibling
+Group 4: Siblings (SIB): Sister, Brother,Sibling
 
-Group 5: Other children (OTH_C): Child, Friend, Playmate, Student, Girl, Teenager
+Group 5: Other children (OTH_C): Child, Friend, Playmate, Boy, Girl, Student
 
-Group 6: Other adults (Exosystem) (OTH_A) : Investigator, Media, Unidentified, Adult, Visitor, Participants, Environment, Male, Uncertain
+Group 6: Other adults (OTH_A) : Investigator, Participants, Adult,Unidentified, Other, Media, Visitor, Environment,Male, Female, Group, Doctor, Uncertain
 
 ```{r}
 source(here("02Script", "03RoleMap.R"))
@@ -132,7 +158,8 @@ count_by_category
 Load information on the target child: number of target child, sex, age
 
 ```{r,echo=TRUE, results="show"}
-d_target_child <- readRDS(here("01Data", "01Childes", "d_target_child.rds"))
+d_target_child <- readRDS(here("01Data", "01Childes", "d_target_child.rds")) %>%
+  filter(!corpus_name %in% EXCLUDE_CORPORA)
 
 sum_sex <- d_target_child %>%
   count(sex)
@@ -148,6 +175,71 @@ sum_age <-d_target_child %>%
 sum_age
 ```
 
+### Child age distribution
+
+Age distribution across transcripts, and count of participants with missing age information.
+
+```{r age-distribution, echo=TRUE, results="show"}
+# Age distribution at the transcript level
+age_dist <- ut_eng_na %>%
+  distinct(transcript_id, target_child_id, target_child_age) %>%
+  summarise(
+    n_transcripts    = n(),
+    n_children       = n_distinct(target_child_id),
+    missing_age_tr   = sum(is.na(target_child_age)),
+    pct_missing_age  = round(mean(is.na(target_child_age)) * 100, 1),
+    mean_age         = round(mean(target_child_age, na.rm = TRUE), 2),
+    sd_age           = round(sd(target_child_age,   na.rm = TRUE), 2),
+    min_age          = round(min(target_child_age,  na.rm = TRUE), 2),
+    max_age          = round(max(target_child_age,  na.rm = TRUE), 2)
+  )
+print(age_dist)
+
+# Participants (unique children) with missing age in at least one transcript
+missing_age_children <- ut_eng_na %>%
+  distinct(target_child_id, target_child_age) %>%
+  group_by(target_child_id) %>%
+  summarise(any_missing = any(is.na(target_child_age)), .groups = "drop") %>%
+  summarise(
+    n_missing_children = sum(any_missing),
+    n_total_children   = n()
+  )
+print(missing_age_children)
+
+cat(sprintf(
+  "\nChild age information was missing for %d participants (%d transcripts, %.1f%%).\n",
+  missing_age_children$n_missing_children,
+  age_dist$missing_age_tr,
+  age_dist$pct_missing_age
+))
+
+# Histogram of age distribution (observed only)
+p_age_dist <- ut_eng_na %>%
+  distinct(transcript_id, target_child_age) %>%
+  filter(!is.na(target_child_age)) %>%
+  ggplot(aes(x = target_child_age)) +
+  geom_histogram(binwidth = 6, fill = "#4a90d9", colour = "white") +
+  scale_x_continuous(
+    name   = "Child age (months)",
+    breaks = seq(0, 150, 12)
+  ) +
+  labs(
+    title = "Distribution of Child Age Across Transcripts",
+    y     = "Number of transcripts"
+  ) +
+  theme_minimal()
+
+p_age_dist
+
+ggsave(
+  here("03Output", "fig_age_distribution.png"),
+  plot   = p_age_dist,
+  width  = 8,
+  height = 4,
+  dpi    = 300
+)
+```
+
 Load information about the SES and education
 
 ```{r,echo=TRUE, results="show"}
@@ -158,4 +250,136 @@ sum_ses
 sum_education <-d_target_child %>%
   count(education)
 sum_education
+```
+
+### Missing data diagnostics
+
+Missing child age and sex at the transcript level (using utterance data, one row per transcript)
+
+```{r, echo=TRUE, results="show"}
+onlychild_ids <- ut_eng_na %>%
+  group_by(transcript_id) %>%
+  summarise(
+    only_child = all(na.omit(speaker_code) == "CHI"),
+    .groups = "drop"
+  ) %>%
+  filter(only_child) %>%
+  pull(transcript_id)
+
+#sanity check
+length(onlychild_ids)               # how many such transcripts
+
+miss_demo <- ut_eng_na %>%
+  distinct(transcript_id, target_child_age, target_child_sex) %>%
+  summarise(
+    n_transcripts   = n(),
+    missing_age     = sum(is.na(target_child_age)),
+    pct_missing_age = round(mean(is.na(target_child_age)) * 100, 1),
+    missing_sex     = sum(is.na(target_child_sex)),
+    pct_missing_sex = round(mean(is.na(target_child_sex)) * 100, 1)
+  )
+print(miss_demo)
+
+# Final n after excluding only-child transcripts AND missing age
+n_after_excl <- miss_demo$n_transcripts -
+  length(onlychild_ids) -
+  miss_demo$missing_age
+cat(sprintf(
+  "Transcripts after excluding only-child (%d) and missing age (%d): %d\n",
+  length(onlychild_ids), miss_demo$missing_age, n_after_excl
+))
+```
+
+Sex distribution in the age-complete subset (before imputation; imputed values are added in the analysis script)
+
+```{r, echo=TRUE, results="show"}
+sex_obs <- ut_eng_na %>%
+  distinct(transcript_id, target_child_age, target_child_sex) %>%
+  filter(!is.na(target_child_age)) %>%          # same exclusion as analysis
+  count(target_child_sex, name = "n_transcripts") %>%
+  mutate(pct = round(n_transcripts / sum(n_transcripts) * 100, 1))
+print(sex_obs)
+```
+
+### Conversational partner categories per transcript
+
+Number of transcripts with Target Child + exactly 1 partner category vs. more than 1 (using the processed emotion dataset)
+
+```{r, echo=TRUE, results="show"}
+utt_pe <- readRDS(here("01Data", "02Derived", "utt_partners_emotions.rds"))
+
+partner_category_counts <- utt_pe %>%
+  filter(speaker_code != "CHI") %>%           # count partner categories only
+  group_by(transcript_id) %>%
+  summarise(
+    n_partner_categories = n_distinct(role_category, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+partner_summary <- partner_category_counts %>%
+  mutate(partner_group = ifelse(
+    n_partner_categories == 1,
+    "Target Child + 1 partner category",
+    "Target Child + >1 partner categories"
+  )) %>%
+  count(partner_group, name = "n_transcripts") %>%
+  mutate(pct = round(n_transcripts / sum(n_transcripts) * 100, 1))
+
+print(partner_summary)
+```
+
+```{r}
+library(gt)
+library(dplyr)
+
+demo_table <- tibble(
+  Partner       = c("Mother", "Father", "Other Adult", "Known Adult"),
+  Transcripts   = c(1293, 188, 396, 101),
+  Children      = c(310, 14, 99, 4),
+  Age_Range     = c("0.25–10.3", "1.3–4.8", "1.0–9.4", "2.0–5.4"),
+  Female        = c(143, 3, 47, 1),
+  Male          = c(159, 9, 48, 0),
+  Unknown       = c(8, 2, 4, 3)
+) %>%
+  mutate(
+    Female  = paste0(Female,  " (", round(Female  / Children * 100), "%)"),
+    Male    = paste0(Male,    " (", round(Male    / Children * 100), "%)"),
+    Unknown = paste0(Unknown, " (", round(Unknown / Children * 100), "%)")
+  )
+
+demo_table %>%
+  gt() %>%
+  cols_label(
+    Partner   = "Partner",
+    Transcripts = "Transcripts",
+    Children  = "Children",
+    Age_Range = "Age Range (years)",
+    Female    = "Female",
+    Male      = "Male",
+    Unknown   = "Unknown"
+  ) %>%
+  tab_spanner(
+    label   = "Child Sex, *n* (%)",
+    columns = c(Female, Male, Unknown)
+  ) %>%
+  tab_header(
+    title = md("*Descriptive Statistics of Transcripts by Conversational Partner Type*")
+  ) %>%
+  tab_source_note(
+    source_note = md("*Note.* Children = number of unique target children. Age range is reported in years. Unknown = child sex not recorded in CHILDES.")
+  ) %>%
+  opt_table_lines("none") %>%
+  tab_style(
+    style = cell_borders(sides = c("top", "bottom"), weight = px(2)),
+    locations = cells_column_labels()
+  ) %>%
+  tab_style(
+    style = cell_borders(sides = "top", weight = px(2)),
+    locations = cells_title()
+  ) %>%
+  tab_style(
+    style = cell_borders(sides = "bottom", weight = px(2)),
+    locations = cells_body(rows = nrow(demo_table))
+  ) %>%
+  fmt_number(columns = Transcripts, decimals = 0)
 ```

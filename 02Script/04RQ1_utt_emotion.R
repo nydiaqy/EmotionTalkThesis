@@ -8,10 +8,37 @@ onlychild_ids <- ut_eng_na %>%
   filter(only_child == TRUE) %>%
   pull(transcript_id)
 
+length(onlychild_ids)
+
 ut_eng_na_rq1 <- ut_eng_na %>%
   filter(!transcript_id %in% onlychild_ids) %>%   
-  left_join(role_category_map, by = "speaker_role")      #add new role category
+  left_join(role_category_map, by = "speaker_role") #add new role category
 
+ut_eng_na_rq1 %>%
+  summarise(
+    n_transcripts = n_distinct(transcript_id),
+    n_children    = n_distinct(target_child_id),
+    n_utterances  = n()
+  )
+
+
+## Demo RQ1:
+
+ut_eng_na_rq1 %>%
+  distinct(target_child_id, target_child_sex) %>%
+  count(target_child_sex)
+
+# Age range in months and years (from child utterance rows only)
+ut_eng_na_rq1 %>%
+  filter(speaker_role == "Target_Child") %>%
+  summarise(
+    min_age_months = min(target_child_age, na.rm = TRUE),
+    max_age_months = max(target_child_age, na.rm = TRUE),
+    min_age_years  = round(min(target_child_age, na.rm = TRUE) / 12, 1),
+    max_age_years  = round(max(target_child_age, na.rm = TRUE) / 12, 1),
+    mean_age_months = round(mean(target_child_age, na.rm = TRUE), 1),
+    sd_age_months   = round(sd(target_child_age, na.rm = TRUE), 1)
+  )
 #Create target word list
 
 file_lex <- read.csv("~/Desktop/R_WD/ThesisDataAnalysis/1987-Affectivelexicon-foundations_words.csv",

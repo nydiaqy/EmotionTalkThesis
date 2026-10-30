@@ -1,24 +1,14 @@
 ---
-title: "06RQ1Pipeline"
+title: "05RQ1Pipeline"
 output: html_document
 execute:
   dir: project
-
 ---
-
-```{r setup, include=FALSE}
- knitr::opts_chunk$set( echo = FALSE, # hide code by default 
-                        message = FALSE, # hide messages 
-                        warning = FALSE, # hide warnings 
-                        results = "hide" # hide printed output from code 
-                        )
-
-```
 
 Prep work space and load packages
 
 ```{r}
-source(here::here("00_setup.R"))
+source("00_setup.R")
 ```
 
 Load CHILDES transcripts/ utterance dataframe in English-North America
@@ -166,7 +156,6 @@ write.csv(
 
 ### Step 1: Flag ambiguous words from main emotion word list
 
-
 get a list of emotion word count \>10
 
 ```{r}
@@ -250,9 +239,14 @@ saveRDS(amb_utt, here("01Data", "02Derived", "amb_utterances.rds"))
 
 ### Step 3: POS and dependency-based disambiguation (spaCy)
 
-Data Prep go to 05SpacyRTagging_RQ1.R
+### *\* Data Prep*
+
+### *go to 05.1SpacyRTagging_RQ1.R*
+
+The Data Prep step applies part-of-speech tagging using spaCy to candidate emotion-related words that require contextual disambiguation. For each candidate word (e.g., well), we first identify all utterances containing the word and retain their unique IDs. These utterances are then processed using spaCy to extract token-level linguistic information, including lemmas, POS tags, and dependency relations. Both the parsed output and the original subset of utterances are saved and used in the subsequent steps.
 
 ```{r}
+#load main sheet
 amb_utt <- readRDS(here("01Data", "02Derived", "amb_utterances.rds"))
 ```
 
@@ -894,9 +888,10 @@ amb_utt_blue_flagged %>%
 amb_utt_blue_flagged %>%
   filter(id == 1874322)
 ```
+
 #### 3.12 Merry
 
-```{r} 
+```{r}
 df_merry <- readRDS(here("01Data", "02Derived", "01Dataframe","df_merry_utterances.rds")) 
 tok_merry <- readRDS(here("01Data", "02Derived","02Spacy Parsed", "spacy_merry_parsed.rds"))
 ```
@@ -1064,14 +1059,13 @@ amb_utt_merry_flagged %>%
   filter(id == 17486037)
 
 ```
-here
-#### 3.13 Moved
+
+here \#### 3.13 Moved
 
 ```{r}
 df_moved <- readRDS(here("01Data", "02Derived", "01Dataframe","df_moved_utterances.rds"))
 tok_moved <- readRDS(here("01Data", "02Derived","02Spacy Parsed", "spacy_moved_parsed.rds"))
 ```
-
 
 ```{r}
 tok_moved2 <- tok_moved %>%
@@ -1173,6 +1167,7 @@ amb_utt_moved_flagged %>%
 ```
 
 #### 3.7 Certain
+
 ```{r}
 df_certain <- readRDS(here("01Data", "02Derived", "01Dataframe","df_certain_utterances.rds"))
 tok_certain <- readRDS(here("01Data", "02Derived","02Spacy Parsed", "spacy_certain_parsed.rds"))
@@ -1305,7 +1300,6 @@ amb_utt_certain_flagged %>%
   filter(id == 17486037)
 
 ```
-
 
 ####3.5 High
 
@@ -1549,6 +1543,7 @@ amb_utt_touched_flagged %>%
 touched_tok %>% 
   filter(doc_id == 387228)
 ```
+
 ####3.11 Patient
 
 ```{r}
@@ -1657,18 +1652,27 @@ amb_utt_patient_flagged %>%
 
 ```{r}
 library(reticulate)
-use_condaenv("spacyr-arm", required = TRUE)
-py_install("sentence-transformers", pip = TRUE)
+
+python_path <- virtualenv_python("childes_spacy")
+Sys.setenv(RETICULATE_PYTHON = python_path)
+use_virtualenv("childes_spacy", required = TRUE)
+
+# Import Sentence Transformers
 st <- import("sentence_transformers")
 
-amb_utt <- readRDS(here("01Data", "02Derived", "amb_utterances.rds"))
+# Load ambiguous utterances
+amb_utt <- readRDS(
+  here("01Data", "02Derived", "amb_utterances.rds")
+)
 
-# load the model (this defines `model`)
+# Load Sentence-BERT model
 model <- st$SentenceTransformer("all-MiniLM-L6-v2")
 ```
+
 #### 4.1 High
 
 prepare High SBERT candidate set
+
 ```{r}
 high_counts_by_doc <- readRDS(
   here("01Data", "02Derived","03Annotation", "high_counts_by_doc.rds")
@@ -1775,10 +1779,34 @@ saveRDS(
   here("01Data", "02Derived","04S-BERT Scored", "df_high_scored.rds")
 )
 ```
-1. get N-> if > 100, do not manually inspect move on to 2. SBERT -> if mean <0, manually inspect everything >0 -> decide to abandon word or not. 
+
+1.  get N-\> if \> 100, do not manually inspect move on to 2. SBERT -\> if mean \<0, manually inspect everything \>0 -\> decide to abandon word or not.
+
+Manual Inspection
+
+```{r}
+df_high_emotion_candidates <- df_high_scored %>%
+  filter(high_sense_margin > 0) %>% 
+  arrange(desc(high_sense_margin)) %>% 
+  select(
+    doc_id,
+    text = .text,          # or your original text column
+    high_sense_margin
+  )
+
+write.csv(
+  df_high_emotion_candidates,
+  here("01Data", "02Derived", "05Manual Inspectation", "High_Manual Inspectation.csv"),
+  row.names = FALSE
+)
+
+nrow(df_high_emotion_candidates)
+```
 
 #### 4.2 Blue
+
 Prepare Blue candidate dataset
+
 ```{r}
 blue_counts_by_doc <- readRDS(
   here("01Data", "02Derived","03Annotation", "blue_counts_by_doc.rds")
@@ -1870,6 +1898,7 @@ saveRDS(
 ```
 
 Maunal Inspectation
+
 ```{r}
 df_blue_emotion_candidates <- df_blue_scored %>%
   filter(blue_sense_margin > 0) %>% 
@@ -1889,27 +1918,9 @@ write.csv(
 nrow(df_blue_emotion_candidates)
 ```
 
+Manual Inspection
 
-Maunal Inspectation
-```{r}
-df_blue_emotion_candidates <- df_blue_scored %>%
-  filter(blue_sense_margin > 0) %>% 
- arrange(desc(blue_sense_margin)) %>% 
-  select(
-    doc_id,
-    text = .text,          # or your original text column
-    blue_sense_margin
-  )
-
-write.csv(
-  df_blue_emotion_candidates,
-  here("01Data", "02Derived", "05Manual Inspectation", "Blue_Manual Inspectation.csv"),
-  row.names = FALSE
-)
-
-nrow(df_blue_emotion_candidates)
-```
-#### 4.3 *Lost
+#### 4.3 \*Lost
 
 ```{r}
 df_lost <- readRDS(here("01Data", "02Derived", "01Dataframe","df_lost_utterances.rds"))
@@ -1998,6 +2009,7 @@ saveRDS(
   here("01Data", "02Derived","04S-BERT Scored", "df_lost_scored.rds")
 )
 ```
+
 manual inspection
 
 ```{r}
@@ -2019,7 +2031,7 @@ write.csv(
 nrow(df_lost_emotion_candidates)
 ```
 
-#### 3.8 *Quiet
+#### 3.8 \*Quiet
 
 ```{r}
 df_quiet <- readRDS(here("01Data", "02Derived", "01Dataframe","df_quiet_utterances.rds"))
@@ -2127,8 +2139,7 @@ write.csv(
 nrow(df_quiet_emotion_candidates)
 ```
 
-
-#### 3.11 *Low
+#### 3.11 \*Low
 
 ```{r}
 df_low <- readRDS(here("01Data", "02Derived", "01Dataframe","df_low_utterances.rds"))
@@ -2219,7 +2230,6 @@ saveRDS(
 )
 ```
 
-
 ```{r}
 df_low_emotion_candidates <- df_low_scored %>%
   filter(low_sense_margin > 0) %>% 
@@ -2239,8 +2249,9 @@ write.csv(
 nrow(df_low_emotion_candidates)
 ```
 
+### Step 5: Manual Inspectation for the rest of words (counts \<200)
 
-### Step 5: Manual Inspectation for the rest of words (counts <100)
+> A lexicon occurrence is classified as emotion-related when its contextual meaning explicitly denotes an affective state, disposition, or response, or conveys an affective evaluation of a person, object, event, or situation. Occurrences expressing only physical, descriptive, comparative, or otherwise non-affective meanings are excluded.
 
 ```{r}
 manual_cols <-c("rotten","alarm","ill","tender","crushed","gloomy","faint","odd")
@@ -2262,50 +2273,160 @@ write.csv(
 )
 ```
 
-All manually checked - to keep 
+All manually checked - to keep
+
 ```{r}
-#no emotions: low, high 
+#no emotions: low, high, lost 
+quiet_keep_ids <- c(
+  "154000050683",
+  "154000059750",
+  "154000050168",
+  "154000048144",
+  "154000048146",
+  "154000050166",
+  "154000050678",
+  "154000059748",
+  "154000050169",
+  "174000007698",
+  "151000033771"
+)
 
 blue_keep_ids <- c(
-  "17588871","1874322","1874329","2151231","576976","17597709","669881","17665068","577638","726330"
+  "392000328648",
+  "134000110540",
+  "134000110541",
+  "151000077893",
+  "133000005994",
+  "151000047965",
+  "141000003423",
+  "142000026921",
+  "155000023730",
+  "155000023725",
+  "155000052647",
+  "392000388155"
 )
 
-lost_keep_ids <- c(
-  "1527894","459663","17428246", "2057822","17722692","1259827","1094129","2887378","2818728","2849440","
-2007599", "995740","17444311", "17448315","2007599","2584319",
-  "17502496","1731805","1091706","1897272","1578728","2007639"
+certain_keep_ids <- c(
+  "162000057649",
+  "160000006567",
+  "151000021969",
+  "128000010975",
+  "149000007065",
+  "392000425681",
+  "149000279566",
+  "161000097469",
+  "392000453738",
+  "162000074047",
+  "149000119761",
+  "149000035516",
+  "392000425146",
+  "149000027917",
+  "162000158268",
+  "162000164525",
+  "176000033265",
+  "155000056915",
+  "161000018479",
+  "149000125418",
+  "155000064719",
+  "392000428030",
+  "151000059594",
+  "162000079913",
+  "392000394243",
+  "162000114950"
 )
 
-certain_keep_ids <- c("371308","545276","1005121","1184301","1333544","1511526","1511761","2842200","2849875","17501783","17662427","7671589","17679994","17686478","17714307","17724249")
+alarm_keep_ids <- c(
+  "151000054588"
+)
 
-alarm_keep_ids <- c("1182355")
+crushed_keep_ids <- c(
+  "181000010531",
+  "151000014191"
+)
 
-crushed_keep_ids <- c("819179","17501726")
-
-faint_keep_ids <- c("452728",
-  "554853","643331","666780","698206","946715","946754","1146196","1146203","1954799",
-  "1954822","1954834","17271738","17327658"
+faint_keep_ids <- c(
+  "154000016677",
+  "134000174596",
+  "134000174594",
+  "145000009775",
+  "156000150326",
+  "392000026488",
+  "154000016672",
+  "392000033411"
 )
 
 gloomy_keep_ids <- c(
-  "1161295","1560492","2242059",
-  "17545451","17545507","17545531"
+  "133000123027",
+  "155000002719",
+  "392000280791",
+  "149000107181",
+  "392000281420"
 )
 
 ill_keep_ids <- c(
-  "673511","749108","1006772","1049666","1071050","1071062",
-  "1071078","1071107","1331881","1331893","1331902","1468506","1479532","1488385","1488393","1550136","1951185","2291926","2356751"
+  "134000178360",
+  "147000002468",
+  "149000282630",
+  "133000176915",
+  "139000083187",
+  "392000298761",
+  "172000020961",
+  "162000044748",
+  "172000020959",
+  "392000130725",
+  "172000020960",
+  "151000081517",
+  "172000020963",
+  "149000282631",
+  "172000004185",
+  "149000282629"
 )
 
-odd_keep_ids <- c("1266039",
-"368924","375262","543852","581460","581510","581543","582494","582616","582957","583214","584559","584734","629928","658670","664948","665055","665068","670460","1438454","1456906","1458011","1477736","1491850","1492446","1504646","1504746","1504828","1507783",
-"1507797","1513593","1516144","1520108","1520172","1521941","1526837","1526990","1529600","1534672","1539931","1541834","1545547","1547160","1563228","1563314","1567252","1567909","1567928","1569065","1571522","1897872","2145584","2166605","2357234","2575441","2575454","2575511","2575536","2575565","2575589","2575613","2579033","2602494","2815642","2824508","2826951","2829779","2837529",
-"17287014","17438120","17512577","17516705","17516732","17516744","17524422","17524578","17524592","17529103","17529114","17532831","17537369","17537397","17699852","450183","582454","598709","602771","1378593","1545538","1897863","1897891","1921627","2575427","2575524","2575580","2575603","2575683","2575707","17516691","17516671","17529091","17535196","17535208","17535229","17535292","17537384")
+odd_keep_ids <- c(
+  "135000287924",
+  "145000009542"
+)
 
-rotten_keep_ids <- c("749197","1104561","1476204","1733024","1743442","2042892","2042927","2042961","2052260","2055194","2055386","2055427","2055975","2056072","2056162","2056193","2061308","2065633","2065813","2076216","2076561","2076830","2078829","2079116","2299477","1305291","2055402","2056190")
+rotten_keep_ids <- c(
+  "156000083389",
+  "156000103732",
+  "149000257716",
+  "156000135814",
+  "156000123316",
+  "156000083385",
+  "139000181194",
+  "156000092592",
+  "156000119637",
+  "168000001321",
+  "156000083387",
+  "156000123793",
+  "156000155180",
+  "156000088932",
+  "139000192682",
+  "156000140790",
+  "139000181146",
+  "149000045452",
+  "156000123631",
+  "156000155241",
+  "156000139831",
+  "156000123795",
+  "156000155176",
+  "168000006935",
+  "156000092594",
+  "156000092591",
+  "156000138040",
+  "179000011338",
+  "156000155175",
+  "139000181152"
+)
 
-tender_keep_ids <- c( "1110743","1289804","1339572","1478498","1733271","2134420","2155854","1195584","1339577","2015077","17367220","17382859")
+tender_keep_ids <- c(
+  "155000073521",
+  "155000073529",
+  "155000073525"
+)
 ```
+
 ###Step 6 Merge back
 
 ```{r}
@@ -2313,7 +2434,7 @@ tender_keep_ids <- c( "1110743","1289804","1339572","1478498","1733271","2134420
 utt_partners_emotions_merged <- utt_partners_emotions %>%
   mutate(
     blue = if_else(id %in% blue_keep_ids, blue, 0L),
-    lost = if_else(id %in% lost_keep_ids, lost, 0L),
+    quiet = if_else(id %in% quiet_keep_ids, quiet, 0L),
     certain = if_else(id %in% certain_keep_ids, alarm, 0L),
     alarm = if_else(id %in% alarm_keep_ids, alarm, 0L), 
     crushed = if_else(id %in% crushed_keep_ids, crushed, 0L), 
@@ -2338,131 +2459,145 @@ utt_partners_emotions_merged <- utt_partners_emotions_merged %>%
   ) %>%
   select(-n_like_emotion)
 
-utt_partners_emotions_merged <- utt_partners_emotions_merged %>%
-  mutate(id = as.character(id)) %>%
-  left_join(
-    well_counts_by_doc %>%
-      mutate(doc_id = as.character(doc_id)) %>%
-      select(doc_id, n_well_emotion),
-    by = c("id" = "doc_id")
-  ) %>%
-  mutate(
-    well = coalesce(n_well_emotion, 0L)
-  ) %>%
-  select(-n_well_emotion)
-
-utt_partners_emotions_merged <- utt_partners_emotions_merged %>%
-  mutate(id = as.character(id)) %>%
-  left_join(
-    kind_counts_by_doc %>%
-      mutate(doc_id = as.character(doc_id)) %>%
-      select(doc_id, n_kind_emotion),
-    by = c("id" = "doc_id")
-  ) %>%
-  mutate(
-    kind = coalesce(n_kind_emotion, 0L)
-  ) %>%
-  select(-n_kind_emotion)
-
-
-utt_partners_emotions_merged <- utt_partners_emotions_merged %>%
-  mutate(id = as.character(id)) %>%
-  left_join(
-    fine_emotion_counts %>%
-      mutate(doc_id = as.character(doc_id)) %>%
-      select(doc_id, n_fine_emotion),
-    by = c("id" = "doc_id")
-  ) %>%
-  mutate(
-    fine = coalesce(n_fine_emotion, 0L)
-  ) %>%
-  select(-n_fine_emotion)
-
-
 saveRDS(utt_partners_emotions_merged,
         here("01Data","02Derived","utt_partners_emotions_merged.rds"))
 ```
-interim save and clear storage
+Restart R to clear storage 
+
 ```{r}
 utt_partners_emotions_merged <- readRDS(
   here("01Data","02Derived","utt_partners_emotions_merged.rds")
 )
 
-utt_partners_emotions_merged <- utt_partners_emotions_merged %>%
-  mutate(id = as.character(id)) %>%
-  left_join(
-    merry_emotion_counts %>%
-      mutate(doc_id = as.character(doc_id)) %>%
-      select(doc_id, n_merry_emotion),
-    by = c("id" = "doc_id")
-  ) %>%
-  mutate(
-    merry = coalesce(n_merry_emotion, 0L)
-  ) %>%
-  select(-n_merry_emotion)
+# Match utterance IDs
+idx <- match(
+  as.character(utt_partners_emotions_merged$id),
+  as.character(amb_utt_well_flagged$doc_id)
+)
 
-utt_partners_emotions_merged <- utt_partners_emotions_merged %>%
-  mutate(id = as.character(id)) %>%
-  left_join(
-    moved_emotion_counts %>%
-      mutate(doc_id = as.character(doc_id)) %>%
-      select(doc_id, n_moved_emotion),
-    by = c("id" = "doc_id")
-  ) %>%
-  mutate(
-    moved = coalesce(n_moved_emotion, 0L)
-  ) %>%
-  select(-n_moved_emotion)
+# Extract disambiguated counts
+well_counts <- amb_utt_well_flagged$n_well_emotion[idx]
+
+# Replace missing counts with 0
+well_counts[is.na(well_counts)] <- 0L
+
+# Assign the complete column
+utt_partners_emotions_merged$well <- well_counts
 
 
-utt_partners_emotions_merged <- utt_partners_emotions_merged %>%
-  mutate(id = as.character(id)) %>%
-  left_join(
-   touched_emotion_counts %>%
-      mutate(doc_id = as.character(doc_id)) %>%
-      select(doc_id, n_touched_emotion),
-    by = c("id" = "doc_id")
-  ) %>%
-  mutate(
-    touched = coalesce(n_touched_emotion, 0L)
-  ) %>%
-  select(-n_touched_emotion)
+idx_kind <- match(
+  as.character(utt_partners_emotions_merged$id),
+  as.character(kind_counts_by_doc$doc_id)
+)
 
-utt_partners_emotions_merged <- utt_partners_emotions_merged %>%
-  mutate(id = as.character(id)) %>%
-  left_join(
-   patient_emotion_counts %>%
-      mutate(doc_id = as.character(doc_id)) %>%
-      select(doc_id, n_patient_emotion),
-    by = c("id" = "doc_id")
-  ) %>%
-  mutate(
-    patient = coalesce(n_patient_emotion, 0L)
-  ) %>%
-  select(-n_patient_emotion)
+kind_counts <- kind_counts_by_doc$n_kind_emotion[idx_kind]
+kind_counts[is.na(kind_counts)] <- 0L
 
-#Exclude high and low
+utt_partners_emotions_merged$kind <- kind_counts
+
+idx_fine <- match(
+  as.character(utt_partners_emotions_merged$id),
+  as.character(fine_emotion_counts$doc_id)
+)
+
+fine_counts <- fine_emotion_counts$n_fine_emotion[idx_fine]
+fine_counts[is.na(fine_counts)] <- 0L
+
+utt_partners_emotions_merged$fine <- fine_counts
+
+saveRDS(utt_partners_emotions_merged,
+        here("01Data","02Derived","utt_partners_emotions_merged.rds"))
+```
+
+interim save and clear storage
+
+```{r}
+
+# MERRY
+idx_merry <- match(
+  as.character(utt_partners_emotions_merged$id),
+  as.character(merry_emotion_counts$doc_id)
+)
+
+merry_counts <- merry_emotion_counts$n_merry_emotion[idx_merry]
+merry_counts[is.na(merry_counts)] <- 0L
+
+utt_partners_emotions_merged$merry <- merry_counts
+
+
+# MOVED
+idx_moved <- match(
+  as.character(utt_partners_emotions_merged$id),
+  as.character(moved_emotion_counts$doc_id)
+)
+
+moved_counts <- moved_emotion_counts$n_moved_emotion[idx_moved]
+moved_counts[is.na(moved_counts)] <- 0L
+
+utt_partners_emotions_merged$moved <- moved_counts
+
+
+# TOUCHED
+idx_touched <- match(
+  as.character(utt_partners_emotions_merged$id),
+  as.character(touched_emotion_counts$doc_id)
+)
+
+touched_counts <- touched_emotion_counts$n_touched_emotion[idx_touched]
+touched_counts[is.na(touched_counts)] <- 0L
+
+utt_partners_emotions_merged$touched <- touched_counts
+
+
+# PATIENT
+idx_patient <- match(
+  as.character(utt_partners_emotions_merged$id),
+  as.character(patient_emotion_counts$doc_id)
+)
+
+patient_counts <- patient_emotion_counts$n_patient_emotion[idx_patient]
+patient_counts[is.na(patient_counts)] <- 0L
+
+utt_partners_emotions_merged$patient <- patient_counts
+
+#Exclude high, low and lost
 utt_partners_emotions_merged <- utt_partners_emotions_merged %>%
   mutate(high = 0L) %>% 
-  mutate(low = 0L) 
-```
-#### save output
-```{r}
-utt_partners_emotions_merged <- utt_partners_emotions_merged %>%
-  mutate(
-    emotion_count = rowSums(
-      pick(all_of(emotion_words)),
-      na.rm = TRUE
-    )
-  )
+  mutate(low = 0L) %>% 
+  mutate(lost = 0L) 
 
+#Recount total emotion words 
+
+# Initialise count vector
+emotion_count <- integer(nrow(utt_partners_emotions_merged))
+
+# Add each emotion word column separately
+for (word in emotion_words) {
+  x <- utt_partners_emotions_merged[[word]]
+
+  x[is.na(x)] <- 0L
+
+  emotion_count <- emotion_count + x
+}
+
+# Replace existing emotion_count
+utt_partners_emotions_merged$emotion_count <- emotion_count
+
+# Free temporary memory
+rm(emotion_count, x)
+gc()
+```
+
+#### save output
+
+```{r}
 saveRDS(utt_partners_emotions_merged,
         here("01Data","02Derived","FINAL_utt_RQ1_emotions_merged.rds"))
 ```
 
-##Sanity Check 
-```{r}
+##Sanity Check
 
+```{r}
 utt_partners_emotions_merged %>%
   filter(id == "2822644") %>%
   select(id,gloss, like)
@@ -2486,28 +2621,15 @@ transcript_check
 Word counts: all partner
 
 ```{r}
-ut_eng_na_rq1 <- ut_eng_na_rq1 %>%
+utt_partners_emotions <- utt_partners_emotions %>%
   mutate(
     word_count = stringr::str_count(gloss, "\\S+")  # counts non-space sequences = words
   )
 
-partner_word_counts <- ut_eng_na_rq1 %>%
+partner_word_counts <- utt_partners_emotions %>%
   group_by(transcript_id) %>%
   summarise(
     total_partner_words = sum(word_count, na.rm = TRUE),
     total_partner_utterances = n()
   )
 ```
-
-
-
-Exclude: Low
-To check: 
-Quiet/ Strong - subtle difference 
-Pride Rock/ Mock Meek
-
-Questions:
-
--   would you like one - counted as non-emotion in this version (ADP) as it appeared in a polite preference question
-
--   how can i be fully confident that I did not exclude other uses of "like" that may broadly refer to emotion?

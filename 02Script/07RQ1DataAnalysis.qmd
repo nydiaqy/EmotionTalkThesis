@@ -7,17 +7,22 @@ editor: visual
 Prep work space and load packages
 
 ```{r}
-source(here::here("00_setup.R"))
+source("00_setup.R")
 library(lme4)
 library(splines)
 library(glmmTMB)
-library(mice)
+library(car)
 ```
 
 Load cleaned dataset
 
 ```{r}
 utt_partners_emotions_merged <- readRDS( here("01Data","02Derived","FINAL_utt_RQ1_emotions_merged.rds") )
+
+# Apply the same corpus exclusions as 02Demographics.qmd
+EXCLUDE_CORPORA <- c("Feldman", "POLER-Controls", "Peters", "EllisWeismer")
+utt_partners_emotions_merged <- utt_partners_emotions_merged %>%
+  filter(!corpus_name %in% EXCLUDE_CORPORA)
 
 file_lex <- read.csv("~/Desktop/R_WD/ThesisDataAnalysis/1987-Affectivelexicon-foundations_words.csv", stringsAsFactors = FALSE) 
 emotion_words <-file_lex$Word
@@ -93,12 +98,27 @@ emotion_counts_long_by_role_merged <- total_emotion_words_by_role_merged %>%
 total_emotion_counts_long_by_role_merged <- emotion_counts_long_by_role_merged %>%
   filter(
     word == "emotion_count"
-  ) %>% 
-  select(role_category,count,freq_per_1000_words)
+  ) %>%
+  select(role_category, count, freq_per_1000_words) %>%
+  mutate(
+    count_hundreds        = round(count / 100, 1),
+    freq_per_1000_words   = round(freq_per_1000_words, 2)
+  )
 total_emotion_counts_long_by_role_merged
 
+# Overall rate across all roles
+overall_rate <- emotion_counts_long_by_role_merged %>%
+  filter(word == "emotion_count") %>%
+  summarise(
+    total_count = sum(count),
+    total_words = sum(total_words),
+    overall_rate_per_1000 = round(total_count / total_words * 1000, 2)
+  )
+overall_rate
+
 write.csv(
-  total_emotion_counts_long_by_role_merged,
+  total_emotion_counts_long_by_role_merged %>%
+    select(role_category, count_hundreds, freq_per_1000_words),
   here("03Output", "emotion word count and frequency_by role.csv"),
   row.names = FALSE
 )
@@ -159,66 +179,226 @@ miss_by_corpus <- utt_model_df %>%
   arrange(desc(pct_miss_sex))
 print(miss_by_corpus)
 
-# --- Sex imputation (following Jia & Wu, 2022; consistent with PI's approach) ---
-# Age is NOT imputed: missingness is structural (several corpora never recorded age),
-# and age is the primary developmental predictor — imputing it risks fabricating
-# the key axis of analysis. Transcripts missing age are excluded (n = XX).
-#
-# Sex is imputed via multilevel predictive mean matching with chained equations
-# (50 iterations, 10 complete datasets), with corpus_name as a cluster variable.
-
-# Step 1: build transcript-level frame for imputation (one row per transcript)
-impute_frame <- utt_model_df %>%
-  filter(num_tokens > 0, !is.na(target_child_age)) %>%   # exclude missing age first
-  distinct(transcript_id, corpus_name, target_child_id,
-           target_child_age, target_child_sex) %>%
-  mutate(
-    target_child_sex = factor(target_child_sex),
-    corpus_name      = factor(corpus_name)
-  )
-
-cat(sprintf("Transcripts available for imputation: %d\n",   nrow(impute_frame)))
-cat(sprintf("  of which missing sex: %d (%.1f%%)\n",
-    sum(is.na(impute_frame$target_child_sex)),
-    mean(is.na(impute_frame$target_child_sex)) * 100))
-
-# Step 2: impute with mice (2l.pmm uses cluster = corpus_name for multilevel PMM)
-set.seed(2024)
-imp <- mice(
-  impute_frame %>% select(target_child_sex, target_child_age, corpus_name),
-  method    = "pmm",          # predictive mean matching for binary factor
-  m         = 10,             # 10 complete datasets
-  maxit     = 50,             # 50 iterations
-  printFlag = FALSE
-)
-
-# Step 3: pool — take modal imputed sex per transcript across 10 datasets
-imputed_sex <- lapply(1:10, function(i) complete(imp, i)$target_child_sex)
-modal_sex <- apply(do.call(cbind, lapply(imputed_sex, as.integer)), 1,
-                   function(x) names(which.max(table(x))))
-modal_sex <- ifelse(modal_sex == "1", levels(impute_frame$target_child_sex)[1],
-                                      levels(impute_frame$target_child_sex)[2])
-
-impute_frame$target_child_sex_imp <- ifelse(
-  is.na(impute_frame$target_child_sex),
-  modal_sex,
-  as.character(impute_frame$target_child_sex)
-)
-
-cat(sprintf("Transcripts retained after sex imputation: %d\n", nrow(impute_frame)))
-
-# Step 4: merge imputed sex back and apply filters
+# Retain all transcripts with at least 1 token.
+# Missing age and sex are kept as-is; models drop incomplete rows automatically.
+# Sex is coded "unknown" rather than NA so those transcripts still enter the model.
 utt_model_df_rq1 <- utt_model_df %>%
-  filter(num_tokens > 0, !is.na(target_child_age)) %>%
-  left_join(
-    impute_frame %>% select(transcript_id, target_child_sex_imp),
-    by = "transcript_id"
-  ) %>%
-  mutate(target_child_sex = target_child_sex_imp) %>%
-  select(-target_child_sex_imp) %>%
-  filter(!is.na(target_child_sex))
+  filter(num_tokens > 0) %>%
+  mutate(target_child_sex = replace_na(target_child_sex, "unknown"))
+
+cat(sprintf("Transcripts in model dataset: %d\n",
+            n_distinct(utt_model_df_rq1$transcript_id)))
+cat(sprintf("  missing age: %d\n",
+            sum(is.na(distinct(utt_model_df_rq1, transcript_id, target_child_age)$target_child_age)))
+)
+cat(sprintf("  sex unknown: %d\n",
+            sum(distinct(utt_model_df_rq1, transcript_id, target_child_sex)$target_child_sex == "unknown"))
+)
 
 ```
+
+### Sex distribution of target children in model dataset
+
+```{r sex-distribution}
+# One row per unique child (not per transcript) to avoid double-counting
+sex_dist <- utt_model_df_rq1 %>%
+  distinct(target_child_id, target_child_sex) %>%
+  count(target_child_sex, name = "n_children") %>%
+  mutate(pct = round(n_children / sum(n_children) * 100, 1)) %>%
+  arrange(desc(n_children))
+
+print(sex_dist)
+
+# Also at transcript level (children contribute multiple transcripts)
+sex_dist_tr <- utt_model_df_rq1 %>%
+  distinct(transcript_id, target_child_sex) %>%
+  count(target_child_sex, name = "n_transcripts") %>%
+  mutate(pct = round(n_transcripts / sum(n_transcripts) * 100, 1)) %>%
+  arrange(desc(n_transcripts))
+
+cat("\nBy transcript:\n")
+print(sex_dist_tr)
+```
+
+## RQ1a. Environmental input vs. target child — aggregate trajectory
+
+Collapse all non-target-child speakers into a single "Environmental Input" category and compare its emotion-word trajectory to the target child's trajectory across age. This gives a two-line summary: how the child's input environment as a whole tracks alongside the child's own production.
+
+```{r rq1a-data}
+df_tr_env <- utt_model_df_rq1 %>%
+  mutate(role_env = if_else(role_category == "Target Child",
+                            "Target Child", "Environmental Input")) %>%
+  group_by(transcript_id, corpus_name, target_child_id,
+           role_env, target_child_age, target_child_sex) %>%
+  summarise(
+    emotion_count = sum(emotion_count, na.rm = TRUE),
+    num_tokens    = sum(num_tokens,    na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(num_tokens > 0) %>%
+  mutate(role_env = relevel(factor(role_env), ref = "Environmental Input"))
+```
+
+```{r rq1a-model}
+m_env <- glmmTMB(
+  emotion_count ~
+    role_env * ns(target_child_age, df = 3) +
+    target_child_sex +
+    offset(log(num_tokens)) +
+    (1 | corpus_name/target_child_id/transcript_id),
+  family = nbinom2(),
+  data   = df_tr_env
+)
+summary(m_env)
+```
+
+```{r rq1a-wald}
+# ── Joint Wald tests: Environmental Input and Target Child age trajectories ────
+# Environmental Input is the reference group, so its trajectory = spline main effects.
+# Target Child trajectory = spline main effects + role_envTarget Child:spline interactions.
+
+coef_env  <- fixef(m_env)$cond
+vcov_env  <- vcov(m_env)$cond
+sp_env    <- grep("^ns\\(target_child_age", names(coef_env), value = TRUE)
+
+wald_env <- lapply(c("Environmental Input", "Target Child"), function(role) {
+  n  <- length(coef_env)
+  H  <- matrix(0, nrow = 3, ncol = n,
+               dimnames = list(paste0("spline_", 1:3), names(coef_env)))
+  for (j in seq_along(sp_env)) {
+    H[j, sp_env[j]] <- 1
+    if (role == "Target Child") {
+      int_name       <- paste0("role_envTarget Child:", sp_env[j])
+      H[j, int_name] <- 1
+    }
+  }
+  lh <- car::linearHypothesis(m_env, hypothesis.matrix = H,
+                               coef. = coef_env, vcov. = vcov_env)
+  data.frame(
+    role    = role,
+    chi_sq  = round(lh$Chisq[2], 3),
+    df      = lh$Df[2],
+    p_value = round(lh[["Pr(>Chisq)"]][2], 4)
+  )
+})
+
+env_wald_tests <- do.call(rbind, wald_env)
+rownames(env_wald_tests) <- NULL
+cat("\nJoint Wald tests — Environmental Input vs Target Child age trajectories:\n")
+print(env_wald_tests)
+```
+
+```{r rq1a-plot}
+age_seq_m <- seq(min(df_tr_env$target_child_age, na.rm = TRUE),
+                 max(df_tr_env$target_child_age, na.rm = TRUE),
+                 by = 1.2)   # ~0.1-year steps in months
+
+new_env <- expand.grid(
+  target_child_age = age_seq_m,
+  role_env         = levels(df_tr_env$role_env),
+  target_child_sex = names(which.max(table(df_tr_env$target_child_sex))),
+  num_tokens       = 1000
+)
+new_env$role_env <- factor(new_env$role_env, levels = levels(df_tr_env$role_env))
+
+pred_env <- predict(m_env, newdata = new_env,
+                    type = "link", se.fit = TRUE, re.form = NA)
+new_env$fit      <- exp(pred_env$fit)
+new_env$ci_lower <- exp(pred_env$fit - 1.96 * pred_env$se.fit)
+new_env$ci_upper <- exp(pred_env$fit + 1.96 * pred_env$se.fit)
+new_env$age_yrs  <- new_env$target_child_age / 12
+
+p_env <- ggplot(new_env, aes(x = age_yrs, y = fit,
+                              colour = role_env, fill = role_env)) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper),
+              alpha = 0.2, colour = NA) +
+  geom_line(
+    data      = subset(new_env, role_env == "Target Child"),
+    linewidth = 1.8
+  ) +
+  geom_line(
+    data      = subset(new_env, role_env != "Target Child"),
+    linewidth = 1
+  ) +
+  scale_colour_manual(
+    name   = NULL,
+    values = c("Target Child"       = "#e05c3a",
+               "Environmental Input" = "#4a90d9")
+  ) +
+  scale_fill_manual(
+    name   = NULL,
+    values = c("Target Child"       = "#e05c3a",
+               "Environmental Input" = "#4a90d9")
+  ) +
+  scale_x_continuous(breaks = seq(0, 12, by = 1),
+                     limits = range(new_env$age_yrs)) +
+  coord_cartesian(ylim = c(0, 25)) +
+  labs(
+    title = "Emotion Word Use: Target Child vs. Aggregated Environmental Input",
+    x     = "Child age (years)",
+    y     = "Expected count per 1,000 words"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title       = element_text(face = "bold", hjust = 0.5),
+    legend.position  = "bottom",
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+print(p_env)
+
+ggsave(
+  filename = here::here("03Output", "RQ1a_env_vs_child_trajectory.png"),
+  plot     = p_env,
+  width    = 8, height = 6, dpi = 300
+)
+
+# Predicted rates at key ages (for write-up)
+target_ages_yrs <- c(0.5, 1, 2, 3, 5, 7, 10, 12)
+
+rates_env <- do.call(rbind, lapply(target_ages_yrs, function(a) {
+  do.call(rbind, lapply(levels(new_env$role_env), function(role) {
+    d   <- new_env[new_env$role_env == role, ]
+    idx <- which.min(abs(d$age_yrs - a))
+    data.frame(
+      role        = role,
+      age_yrs     = round(d$age_yrs[idx], 2),
+      fit         = round(d$fit[idx], 2),
+      ci_lower    = round(d$ci_lower[idx], 2),
+      ci_upper    = round(d$ci_upper[idx], 2)
+    )
+  }))
+}))
+
+cat("\nPredicted rates at key ages (per 1,000 words):\n")
+print(rates_env)
+```
+
+## Raw mean rate per 1,000 words — Environmental Input vs Target Child (from df_tr_env)
+
+```{r raw-means-rq1a}
+df_tr_env %>%
+  mutate(rate_per_1000 = (emotion_count / num_tokens) * 1000) %>%
+  group_by(role_env) %>%
+  summarise(
+    n_transcripts = n(),
+    n_children    = n_distinct(target_child_id),
+    age_min_yrs   = round(min(target_child_age,  na.rm = TRUE) / 12, 1),
+    age_max_yrs   = round(max(target_child_age,  na.rm = TRUE) / 12, 1),
+    mean_age_yrs  = round(mean(target_child_age, na.rm = TRUE) / 12, 1),
+    mean_rate     = round(mean(rate_per_1000,    na.rm = TRUE), 2),
+    median_rate   = round(median(rate_per_1000,  na.rm = TRUE), 2),
+    sd_rate       = round(sd(rate_per_1000,      na.rm = TRUE), 2),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(mean_rate)) %>%
+  print(width = Inf)
+```
+
+------------------------------------------------------------------------
+
+## RQ1b. Developmental trajectories by conversational partner role
 
 ### prep transcript-level dataset
 
@@ -240,6 +420,9 @@ df_tr <- utt_model_df_rq1 %>%
     .groups = "drop"
   ) %>%
   filter(num_tokens > 0)
+
+df_tr <- df_tr %>%
+    mutate(role_category = relevel(factor(role_category), ref = "Mother"))
 
 m_tr_nb <- glmmTMB(
   emotion_count ~
@@ -315,18 +498,21 @@ new_data <- new_data %>%
 #plotting all social partners 
 p <- ggplot(new_data,
             aes(x = target_child_age_years, y = fit,
-                color = role_category, fill = role_category)) + geom_line(
+                color = role_category, fill = role_category)) +
+  geom_line(
     data = subset(new_data, role_category == "Target Child"),
     linewidth = 1.8
-  )+
+  ) +
   geom_line(
     data = subset(new_data, role_category != "Target Child"),
     linewidth = 1
   ) +
-  # 3️⃣ Target Child line + bold)
-  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.2, colour = NA) +
-  scale_x_continuous(breaks = seq(0, 12, by = 1),
-                     limits = c(age_min_y, age_max_y)) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper),
+              alpha = 0.2, colour = NA) +
+  scale_x_continuous(
+    breaks = seq(0, 12, by = 1),
+    limits = c(age_min_y, age_max_y)
+  ) +
   coord_cartesian(ylim = c(0, 25)) +
   labs(
     title = "Emotion Words by Speaker and Child Age",
@@ -340,6 +526,30 @@ p <- ggplot(new_data,
     legend.position = "bottom",
     panel.grid.major = element_blank(),
     panel.grid.minor = element_blank()
+  ) +
+  scale_colour_manual(
+    name = "Partner type",
+    values = c(
+      "Target Child" = "#e05c3a",
+      "Mother" = "#57b403",
+      "Father" = "#a58aff",
+      "Sibling" = "#fb61d7",
+      "Known Adult" = "#c59a00",
+      "Other Adult" = "#06b6eb",
+      "Other Child" = "#a6a6a6"
+    )
+  ) +
+  scale_fill_manual(
+    name = "Partner type",
+    values = c(
+      "Target Child" = "#e05c3a",
+      "Mother" = "#57b403",
+      "Father" = "#a58aff",
+      "Sibling" = "#fb61d7",
+      "Known Adult" = "#c59a00",
+      "Other Adult" = "#06b6eb",
+      "Other Child" = "#a6a6a6"
+    )
   )
 print(p)
 
@@ -545,4 +755,215 @@ summary(utt_model_df_rq1$emotion_count)
 quantile(utt_model_df_rq1$emotion_count, c(.9, .95, .99, .999), na.rm = TRUE)
 max(utt_model_df_rq1$emotion_count, na.rm = TRUE)
 table(utt_model_df_rq1$emotion_count, useNA="no")[1:10]
+```
+
+## Joint Wald Tests — Each Partner's Own Age Trajectory
+
+For each role, tests H0: the three age-spline terms for that role are jointly zero (i.e., the role's own trajectory across child age is flat).
+
+For Target Child (reference): tests the three spline main effects. For all other roles: tests (spline_j + role:spline_j) = 0 jointly for j = 1,2,3.
+
+```{r}
+coef_fe <- fixef(m_tr_nb)$cond
+vcov_fe <- vcov(m_tr_nb)$cond
+
+# Spline main-effect names
+sp_names <- grep("^ns\\(target_child_age", names(coef_fe), value = TRUE)
+cat("Spline main effects:\n"); print(sp_names)
+
+# All roles — Mother is reference, listed first; its test uses spline main effects only
+roles <- c("Mother", "Father", "Known Adult", "Target Child",
+           "Other Adult", "Other Child", "Sibling")
+
+# Sanity check: verify interaction names exist for each non-reference role
+cat("\nInteraction term existence check:\n")
+for (r in roles[-1]) {
+  int_terms <- paste0("role_category", r, ":", sp_names)
+  found     <- int_terms %in% names(coef_fe)
+  cat(sprintf("  %-15s : %s\n", r, paste(ifelse(found, "OK", "MISSING"), collapse = " ")))
+}
+
+# Build contrast matrix and run test for each role
+wald_results <- lapply(roles, function(role) {
+  n_coef     <- length(coef_fe)
+  coef_names <- names(coef_fe)
+
+  H <- matrix(0, nrow = 3, ncol = n_coef,
+              dimnames = list(paste0("spline_", 1:3), coef_names))
+
+  for (j in seq_along(sp_names)) {
+    H[j, sp_names[j]] <- 1                                  # spline main effect
+    if (role != "Mother") {
+      int_name          <- paste0("role_category", role, ":", sp_names[j])
+      H[j, int_name]    <- 1                                 # add interaction
+    }
+  }
+
+  lh     <- linearHypothesis(m_tr_nb, hypothesis.matrix = H,
+                              coef. = coef_fe, vcov. = vcov_fe)
+  chi_sq <- lh$Chisq[2]
+  df_val <- lh$Df[2]
+  p_val  <- lh[["Pr(>Chisq)"]][2]
+
+  data.frame(role    = role,
+             chi_sq  = round(chi_sq, 3),
+             df      = df_val,
+             p_value = round(p_val, 4),
+             is_reference = role == "Mother",
+             stringsAsFactors = FALSE)
+})
+
+traj_tests <- do.call(rbind, wald_results)
+rownames(traj_tests) <- NULL
+
+cat("\nJoint Wald tests — own age trajectory per role:\n")
+print(traj_tests)
+
+write.csv(traj_tests,
+          here::here("03Output", "rq1_partner_trajectory_joint_tests.csv"),
+          row.names = FALSE)
+cat("\nSaved: 03Output/rq1_partner_trajectory_joint_tests.csv\n")
+```
+
+## Predicted Rates at Key Ages and Peak/Trough Detection
+
+```{r}
+# ── 1. Predicted rates at fixed ages ──────────────────────────────────────────
+target_ages <- c(0.5, 1, 2, 3, 5, 7, 10, 12)
+
+# For each role × target age, find the row in new_data closest to that age
+rates_at_ages <- do.call(rbind, lapply(
+  levels(new_data$role_category),
+  function(role) {
+    d <- new_data[new_data$role_category == role, ]
+    do.call(rbind, lapply(target_ages, function(a) {
+      idx <- which.min(abs(d$target_child_age_years - a))
+      data.frame(
+        role      = role,
+        age_years = round(d$target_child_age_years[idx], 2),
+        fit       = round(d$fit[idx],      2),
+        ci_lower  = round(d$ci_lower[idx], 2),
+        ci_upper  = round(d$ci_upper[idx], 2),
+        stringsAsFactors = FALSE
+      )
+    }))
+  }
+))
+rownames(rates_at_ages) <- NULL
+
+cat("=== Predicted rates at key ages ===\n")
+print(rates_at_ages)
+
+write.csv(rates_at_ages,
+          here::here("03Output", "rq1_predicted_rates_at_key_ages.csv"),
+          row.names = FALSE)
+cat("Saved: 03Output/rq1_predicted_rates_at_key_ages.csv\n\n")
+
+# ── 2. Peak and trough per role ───────────────────────────────────────────────
+# Trough excludes the two endpoints (first and last age point per role)
+peak_trough <- do.call(rbind, lapply(
+  levels(new_data$role_category),
+  function(role) {
+    d        <- new_data[new_data$role_category == role, ]
+    d        <- d[order(d$target_child_age_years), ]
+    fit_vals <- d$fit
+    age_vals <- d$target_child_age_years
+    n        <- nrow(d)
+
+    range_fit <- max(fit_vals) - min(fit_vals)
+
+    # Shape classification
+    if (range_fit < 1) {
+      shape <- "approximately flat"
+    } else {
+      is_monotone_inc <- all(diff(fit_vals) >= -0.01)
+      is_monotone_dec <- all(diff(fit_vals) <=  0.01)
+      if      (is_monotone_inc) shape <- "monotonic increase"
+      else if (is_monotone_dec) shape <- "monotonic decrease"
+      else {
+        # Determine if U-shape, inverted U, or complex by checking interior
+        interior_max_idx <- which.max(fit_vals[2:(n-1)]) + 1
+        interior_min_idx <- which.min(fit_vals[2:(n-1)]) + 1
+        # U-shape: interior min is much lower than both endpoints
+        # Inverted U: interior max is much higher than both endpoints
+        end_mean <- mean(c(fit_vals[1], fit_vals[n]))
+        if (fit_vals[interior_max_idx] > end_mean + 0.5 * range_fit) {
+          shape <- "inverted U"
+        } else if (fit_vals[interior_min_idx] < end_mean - 0.5 * range_fit) {
+          shape <- "U-shape"
+        } else {
+          shape <- "complex"
+        }
+      }
+    }
+
+    # Peak: global max
+    peak_idx      <- which.max(fit_vals)
+    peak_age      <- round(age_vals[peak_idx], 2)
+    peak_fit_val  <- round(fit_vals[peak_idx], 2)
+
+    # Trough: interior minimum (exclude endpoints); NA if flat or monotonic
+    if (shape %in% c("approximately flat", "monotonic increase", "monotonic decrease")) {
+      trough_age     <- NA_real_
+      trough_fit_val <- NA_real_
+    } else {
+      interior_idx   <- 2:(n - 1)
+      trough_idx     <- interior_idx[which.min(fit_vals[interior_idx])]
+      trough_age     <- round(age_vals[trough_idx], 2)
+      trough_fit_val <- round(fit_vals[trough_idx], 2)
+    }
+
+    data.frame(
+      role            = role,
+      peak_age_years  = peak_age,
+      peak_fit        = peak_fit_val,
+      trough_age_years = trough_age,
+      trough_fit      = trough_fit_val,
+      shape_note      = shape,
+      stringsAsFactors = FALSE
+    )
+  }
+))
+rownames(peak_trough) <- NULL
+
+cat("=== Peak and trough per role ===\n")
+print(peak_trough)
+
+# Sanity check: flag near-flat roles
+flat_roles <- peak_trough$role[peak_trough$shape_note == "approximately flat"]
+if (length(flat_roles) > 0) {
+  cat(sprintf("\nNote: the following roles have range < 1/1000 words (approx. flat): %s\n",
+              paste(flat_roles, collapse = ", ")))
+}
+
+# Sanity check: Mother endpoint values
+m_low  <- rates_at_ages$fit[rates_at_ages$role == "Mother" & rates_at_ages$age_years == 0.5]
+m_high <- rates_at_ages$fit[rates_at_ages$role == "Mother" & rates_at_ages$age_years == 12]
+cat(sprintf("\nSanity check — Mother predicted rate:\n  at 0.5 yr: %.2f/1000  |  at 12 yr: %.2f/1000\n",
+            m_low, m_high))
+
+write.csv(peak_trough,
+          here::here("03Output", "rq1_peak_trough_by_role.csv"),
+          row.names = FALSE)
+cat("Saved: 03Output/rq1_peak_trough_by_role.csv\n")
+```
+
+## Raw mean rate per 1,000 words by partner role (from df_tr)
+
+```{r raw-means-by-role}
+df_tr %>%
+  group_by(role_category) %>%
+  summarise(
+    n_transcripts = n(),
+    n_children    = n_distinct(target_child_id),
+    age_min_yrs   = round(min(target_child_age,  na.rm = TRUE) / 12, 1),
+    age_max_yrs   = round(max(target_child_age,  na.rm = TRUE) / 12, 1),
+    mean_age_yrs  = round(mean(target_child_age, na.rm = TRUE) / 12, 1),
+    mean_rate     = round(mean(rate_per_1000,    na.rm = TRUE), 2),
+    median_rate   = round(median(rate_per_1000,  na.rm = TRUE), 2),
+    sd_rate       = round(sd(rate_per_1000,      na.rm = TRUE), 2),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(mean_rate)) %>%
+  print(width = Inf)
 ```

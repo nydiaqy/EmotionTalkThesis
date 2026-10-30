@@ -1,5 +1,5 @@
 ---
-title: "09 – RQ2 & RQ3: Windowed Cross-Recurrence Analysis"
+title: "08 – RQ2 & RQ3: Windowed Cross-Recurrence Analysis"
 format: html
 editor: visual
 ---
@@ -18,8 +18,8 @@ We restrict attention to a **diagonal band** of width ±W around the main diagon
 
 **Directionality** — above vs. below the diagonal carries directional meaning:
 
--   lag L = j − i \> 0 (above diagonal): child uses emotion at turn i, partner at later turn j → **child leads**
--   lag L = j − i \<= 0 (below diagonal): partner speaks first → **partner leads**
+- lag L = j − i \> 0 (above diagonal): child uses emotion at turn i, partner at later turn j → **child leads**
+- lag L = j − i \<= 0 (below diagonal): partner speaks first → **partner leads**
 
 Asymmetry index = RR at positive lags − RR at negative lags (positive = child leads).
 
@@ -30,12 +30,12 @@ Asymmetry index = RR at positive lags − RR at negative lags (positive = child 
 ## 0. Setup
 
 ```{r setup, message=FALSE, warning=FALSE}
-source(here::here("00_setup.R"))
+source("00_setup.R")
 library(lme4)
+library(lmerTest)   # Satterthwaite p-values for lmer fixed effects
 library(splines)
 library(emmeans)
 library(broom.mixed)
-library(ggeffects)
 library(ggeffects)
 library(dplyr)
 ```
@@ -47,9 +47,14 @@ library(dplyr)
 ```{r load-data}
 utt <- readRDS(here("01Data", "02Derived", "FINAL_utt_RQ1_emotions_merged.rds"))
 
+# Apply the same corpus exclusions as 02Demographics.qmd and 07RQ1DataAnalysis.qmd
+EXCLUDE_CORPORA <- c("Feldman", "Peters")
+utt <- utt %>% filter(!corpus_name %in% EXCLUDE_CORPORA)
+
 cat("Rows:", nrow(utt), "\n")
 cat("Transcripts:", n_distinct(utt$transcript_id), "\n")
 cat("Children:", n_distinct(utt$target_child_id), "\n")
+cat("Corpora:", n_distinct(utt$corpus_name), "\n")
 ```
 
 ------------------------------------------------------------------------
@@ -75,26 +80,45 @@ saveRDS(crqa_all, here("01Data", "02Derived", "CRQA Roles Sep.rds"))
 ## 3. Aggregate utterances → turns
 
 ```{r build-turns}
-crqa_turns <- crqa_all %>%
-  group_by(transcript_id) %>%
-  arrange(id, .by_group = TRUE) %>%
-  mutate(
-    speaker_category = if_else(role_category == "Target Child", "child", "partner"),
-    turn_change = speaker_category != lag(speaker_category,
-                                          default = first(speaker_category)),
-    turn_id = cumsum(turn_change) + 1L
-  ) %>%
-  group_by(transcript_id, turn_id) %>%
-  summarise(
-    target_child_id  = first(target_child_id),
-    target_child_age = first(target_child_age),
-    target_child_sex = first(target_child_sex),
-    speaker_category = first(speaker_category),
-    emotion_count    = sum(emotion_count, na.rm = TRUE),
-    n_utts           = n(),
-    .groups = "drop"
-  ) %>%
-  arrange(transcript_id, turn_id)
+library(data.table)
+
+# Keep only columns needed for CRQA
+crqa_dt <- as.data.table(crqa_all)[, .(
+  transcript_id,
+  id,
+  target_child_id,
+  target_child_age,
+  target_child_sex,
+  role_category,
+  emotion_count
+)]
+
+# Sort utterances chronologically within transcripts
+setorder(crqa_dt, transcript_id, id)
+
+# Identify speaker category
+crqa_dt[, speaker_category := fifelse(
+  role_category == "Target Child",
+  "child",
+  "partner"
+)]
+
+# Identify changes between child and partner
+crqa_dt[, turn_id := rleid(speaker_category),
+        by = transcript_id]
+
+# Aggregate utterances into conversational turns
+crqa_turns <- crqa_dt[, .(
+  target_child_id  = first(target_child_id),
+  target_child_age = first(target_child_age),
+  target_child_sex = first(target_child_sex),
+  speaker_category = first(speaker_category),
+  emotion_count    = sum(emotion_count, na.rm = TRUE),
+  n_utts           = .N
+), by = .(transcript_id, turn_id)]
+
+# Sort final output
+setorder(crqa_turns, transcript_id, turn_id)
 ```
 
 ------------------------------------------------------------------------
@@ -259,26 +283,19 @@ recurrence_profile <- function(cs, ps, W) {
 }
 
 # Summary metrics from profile
-summarise_crqa <- function(profile) {
-  # wRR: total recurrences in band / total cells in band
+summarise_crqa <- function(profile, W = 4) {
   wRR <- sum(profile$co) / sum(profile$n_cells)
-
-  # Directionality: above diagonal = child leads (lag > 0)
-  #                 at or below diagonal = partner leads (lag <= 0)
-  # lag = 0 is partner-leading because partner always speaks first
-  # within each aligned turn-pair (partner-first convention)
-  pos <- profile %>% filter(lag > 0)
-  neg <- profile %>% filter(lag <= 0)
+  
+  pos <- profile %>% filter(lag >= 1,        lag <= W)      # +1 to +W
+  neg <- profile %>% filter(lag >= -(W - 1), lag <= 0)      # 0 to -(W-1)
+  
   RR_pos <- sum(pos$co) / sum(pos$n_cells)
   RR_neg <- sum(neg$co) / sum(neg$n_cells)
-
-  tibble(
-    wRR        = wRR,
-    RR_pos     = RR_pos,       # child leads
-    RR_neg     = RR_neg,       # partner leads (includes lag 0)
-    asymmetry  = RR_pos - RR_neg   # + = child leads, − = partner leads
-  )
+  
+  tibble(wRR = wRR, RR_pos = RR_pos, RR_neg = RR_neg,
+         asymmetry = RR_pos - RR_neg)
 }
+  
 ```
 
 ------------------------------------------------------------------------
@@ -313,6 +330,15 @@ cat("Mean asymmetry:     ", round(mean(crqa_results$asymmetry), 5),
 Shuffle the child series to destroy temporal order while preserving its emission rate. Any remaining recurrence is due purely to base rates (both speakers happen to use emotion words at similar rates), not coupling. Subtracting this baseline removes the base-rate contribution from both wRR and asymmetry.
 
 ```{r shuffled-baseline}
+crqa_results <- crqa_results %>%
+  mutate(transcript_id = as.character(transcript_id))
+
+crqa_series_f <- crqa_series_f %>%
+  mutate(transcript_id = as.character(transcript_id))
+
+utt <- utt %>%
+  mutate(transcript_id = as.character(transcript_id))
+
 set.seed(42)
 
 crqa_shuffled <- map_dfr(seq_len(nrow(crqa_series_f)), function(i) {
@@ -343,6 +369,10 @@ crqa_data <- crqa_results %>%
   left_join(crqa_shuffled, by = "transcript_id") %>%
   dplyr::select(-target_child_age, -target_child_sex, -target_child_id) %>%
   left_join(age_lookup, by = "transcript_id") %>%
+  left_join(
+    crqa_series_f %>% dplyr::select(transcript_id, child_emo_rate, partner_emo_rate),
+    by = "transcript_id"
+  ) %>%
   mutate(
     wRR_excess           = wRR - wRR_shuf,
     asymmetry_corrected  = (RR_pos - RR_pos_shuf) - (RR_neg - RR_neg_shuf),
@@ -358,79 +388,230 @@ cat("Mean corrected asymmetry:  ", round(mean(crqa_data$asymmetry_corrected), 5)
 
 ------------------------------------------------------------------------
 
-## 10. RQ2 — Is observed co-occurrence greater than chance?
+## 9.5. Reshape to long format
 
-### 10a. Paired test
+Both the RQ2 and RQ3 condition × age interaction models require data in long format, with one row per transcript × condition combination. The `(1 | transcript_id)` random effect in these models is the mixed-effects analogue of pairing: it absorbs stable transcript-level variance so that the condition contrast is identified from within-transcript variation only.
+
+```{r reshape-long}
+crqa_long_wrr <- crqa_data %>%
+  pivot_longer(
+    cols      = c(wRR, wRR_shuf),
+    names_to  = "condition",
+    values_to = "wRR_value"
+  ) %>%
+  mutate(
+    condition = factor(
+      if_else(condition == "wRR", "Observed", "Shuffled"),
+      levels = c("Shuffled", "Observed")
+    )
+  )
+
+crqa_long_asym <- crqa_data %>%
+  pivot_longer(
+    cols      = c(asymmetry, asymmetry_shuf),
+    names_to  = "condition",
+    values_to = "asym_value"
+  ) %>%
+  mutate(
+    condition = factor(
+      if_else(condition == "asymmetry", "Observed", "Shuffled"),
+      levels = c("Shuffled", "Observed")
+    )
+  )
+
+cat("Long-format rows (WRR):       ", nrow(crqa_long_wrr),  "\n")
+cat("Long-format rows (Asymmetry): ", nrow(crqa_long_asym), "\n")
+```
+
+------------------------------------------------------------------------
+
+## RQ2a. Temporal Contingency with the Social Environment Across Development
+
+Across the full sample, children and their social partners showed systematic co-occurrence of emotion words across conversational turns. The analyses proceed in two parts. Part A characterises the aggregate cross-recurrence structure descriptively across all lags. Part B tests whether above-chance temporal coupling changes across child age.
+
+------------------------------------------------------------------------
+
+### A. Aggregate Recurrence Profile
+
+> **DESCRIPTIVE RESULT.** This section describes the mean recurrence structure across lags (−W to +W turns). No developmental inference is drawn here.
+
+The cross-recurrence profile plots mean RR as a function of lag for observed and shuffled series. Concentration of recurrence near lag 0 indicates that emotion word co-occurrence is a short-range phenomenon; elevation above the shuffled baseline confirms that co-occurrence exceeds what is expected from independent base-rate contributions alone.
+
+```{r agg-profile}
+# Observed recurrence profile across all transcripts
+profile_all <- map_dfr(seq_len(nrow(crqa_series_f)), function(i) {
+  cs <- unlist(crqa_series_f$child_series[[i]])
+  ps <- unlist(crqa_series_f$partner_series[[i]])
+  na <- crqa_series_f$n_aligned[i]
+
+  recurrence_profile(cs[1:na], ps[1:na], W = WINDOW_W) %>%
+    mutate(
+      RR            = co / n_cells,
+      transcript_id = crqa_series_f$transcript_id[i]
+    )
+})
+
+# Shuffled baseline profile (same seed as Section 9)
+set.seed(42)
+profile_shuf <- map_dfr(seq_len(nrow(crqa_series_f)), function(i) {
+  cs_shuf <- sample(unlist(crqa_series_f$child_series[[i]]))
+  ps      <- unlist(crqa_series_f$partner_series[[i]])
+  na      <- crqa_series_f$n_aligned[i]
+
+  recurrence_profile(cs_shuf[1:na], ps[1:na], W = WINDOW_W) %>%
+    mutate(
+      RR            = co / n_cells,
+      transcript_id = crqa_series_f$transcript_id[i]
+    )
+})
+
+# Summarise by lag across transcripts (function reused by partner profile below)
+summarise_profile <- function(df, condition_label) {
+  df %>%
+    group_by(lag) %>%
+    summarise(
+      mean_RR = mean(RR, na.rm = TRUE),
+      se_RR   = sd(RR,   na.rm = TRUE) / sqrt(n()),
+      .groups = "drop"
+    ) %>%
+    mutate(condition = condition_label)
+}
+
+profile_combined <- bind_rows(
+  summarise_profile(profile_all,  "Observed"),
+  summarise_profile(profile_shuf, "Shuffled")
+)
+```
+
+```{r fig-rq2a-profile}
+# Figure RQ2a-1. Aggregate cross-recurrence profile
+ggplot(profile_combined, aes(x = lag, y = mean_RR,
+                              colour = condition, fill = condition)) +
+  geom_ribbon(aes(ymin = mean_RR - se_RR, ymax = mean_RR + se_RR),
+              alpha = 0.2, colour = NA) +
+  geom_line(linewidth = 1) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey40") +
+  scale_colour_manual(values = c("Observed" = "#2980b9", "Shuffled" = "grey60")) +
+  scale_fill_manual(  values = c("Observed" = "#2980b9", "Shuffled" = "grey60")) +
+  scale_x_continuous(breaks = seq(-WINDOW_W, WINDOW_W, by = 2)) +
+  labs(
+    title    = "Figure RQ2a-1. Mean cross-recurrence profile across all transcripts",
+    subtitle = "Lag > 0: child leads  |  Lag ≤ 0: partner leads  |  shading = ±1 SE",
+    x        = "Lag (turns)", y = "Mean RR",
+    colour   = NULL, fill = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top")
+```
+
+*Reporting note (fill in after running):* The observed profile peaked at lag \[±X\] (mean RR = \[X\]), indicating that emotion word co-occurrence was most concentrated within \[X–X\] consecutive turns. Recurrence declined monotonically with increasing lag distance and converged toward the shuffled baseline at the window boundary (lag ±\[W\]). This profile pattern confirms that W = \[W\] turns captures the main concentration of temporal coupling without including lags at which observed and chance co-occurrence are indistinguishable.
+
+*Lag asymmetry note:* \[If the profile is visibly asymmetric around lag 0, note whether positive or negative lags show higher RR — this prefigures the RQ3 asymmetry analysis.\]
+
+------------------------------------------------------------------------
+
+### B. Developmental Change in Temporal Contingency
+
+> **INFERENTIAL RESULT.** This section tests whether above-chance temporal coupling — the gap between observed and shuffled WRR — changes with child age.
+
+#### B.1. Overall above-chance temporal coupling
 
 ```{r rq2-test}
 t.test(crqa_data$wRR, crqa_data$wRR_shuf,
        paired = TRUE, alternative = "greater")
 ```
 
-### 10b. Does coupling vary with child age?
+#### B.2. Condition × Age Interaction Model (Primary Inferential Test)
+
+The interaction model fits observed and shuffled WRR trajectories simultaneously. `(1 | transcript_id)` restores the paired structure: it absorbs stable transcript-level variance so the condition contrast is identified from within-transcript variation only — the mixed-effects analogue of a paired t-test.
+
+*Reporting note:* Report the overall model (summary below), the omnibus LRT (B.3), and the predicted trajectory figure (B.7). Individual spline coefficients do not require narrative description.
 
 ```{r rq2-model}
 m_rq2 <- lmer(
+  wRR_value ~
+    condition * ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 | corpus_name) +
+    (1 | target_child_id) +
+    (1 | transcript_id),
+  data = crqa_long_wrr,
+  REML = TRUE
+)
+summary(m_rq2)
+confint(m_rq2, method = "Wald")
+```
+
+#### B.3. Omnibus Test — Does the Observed–Shuffled Gap Change Across Development?
+
+A likelihood-ratio test on the 3-df interaction block tests whether the developmental trajectory of WRR differs between observed and shuffled conditions — i.e., whether the gap converges or diverges across age. This is the primary test of RQ2.
+
+*Reporting note:* Report χ²(3), p. If significant, describe the developmental direction using emmeans (B.5) and the predicted trajectories (B.7). If non-significant, report that the gap was developmentally stable and cite the main effect of condition from B.2.
+
+```{r rq2-lrt}
+m_rq2_main <- lmer(
+  wRR_value ~
+    condition + ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 | corpus_name) + (1 | target_child_id) + (1 | transcript_id),
+  data = crqa_long_wrr, REML = FALSE
+)
+m_rq2_inter <- lmer(
+  wRR_value ~
+    condition * ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 | corpus_name) + (1 | target_child_id) + (1 | transcript_id),
+  data = crqa_long_wrr, REML = FALSE
+)
+anova(m_rq2_main, m_rq2_inter)
+```
+
+#### B.4. Supplementary — Difference Score Model
+
+> **SUPPLEMENTARY.** The difference score model is secondary to B.2–B.3 and included for completeness. The primary inferential framework is the condition × age interaction (B.2).
+
+The difference score (`wRR_excess = wRR − wRR_shuf`) directly quantifies above-chance temporal coupling. Framing note: the excess approaching zero at older ages means coupling *increasingly resembles independent contributions*, not that recurrence has disappeared — overall WRR remains substantial.
+
+```{r rq2-excess-model}
+m_rq2_excess <- lmer(
   wRR_excess ~
     ns(target_child_age_yrs, df = 3) +
     target_child_sex +
-    (1 | corpus_name) +
-    (1 | target_child_id),
-  data    = crqa_data,
-  REML    = TRUE
+    (1 | corpus_name) + (1 | target_child_id),
+  data = crqa_data, REML = TRUE
 )
-summary(m_rq2)
+summary(m_rq2_excess)
+confint(m_rq2_excess, method = "Wald")
+
+# LRT: does above-chance coupling change across development?
+m_rq2_excess_null <- lmer(
+  wRR_excess ~ 1 + target_child_sex +
+    (1 | corpus_name) + (1 | target_child_id),
+  data = crqa_data, REML = FALSE
+)
+m_rq2_excess_age <- lmer(
+  wRR_excess ~ ns(target_child_age_yrs, df = 3) + target_child_sex +
+    (1 | corpus_name) + (1 | target_child_id),
+  data = crqa_data, REML = FALSE
+)
+anova(m_rq2_excess_null, m_rq2_excess_age)
 ```
 
-### 10b-ii. Paired t-tests by developmental stage
+#### B.5. Estimated Marginal Means at Key Ages
 
-Rationale: the overall paired test (10a) collapses all ages. Here we test whether observed wRR \> shuffled wRR WITHIN each of three broad developmental windows, using the same paired design. Stage boundaries follow convention in developmental psycholinguistics: Early = 0–3 yrs (pre-school, emergent language), Middle = 3–7 yrs (school-entry, rapid vocabulary growth), Late = 7–12 yrs (school-age).
+> **INFERENTIAL RESULT.** Estimated marginal means from `m_rq2` at representative ages (2, 4, 6, 8, 10 years) quantify the observed vs. shuffled gap on the original scale and provide the key numbers for Results reporting.
 
-```{r rq2-stage-tests}
-crqa_data_stages <- crqa_data %>%
-  filter(!is.na(target_child_age_yrs)) %>%
-  mutate(
-    dev_stage = case_when(
-      target_child_age_yrs <  3 ~ "Early (0\u20133 yrs)",
-      target_child_age_yrs <  7 ~ "Middle (3\u20137 yrs)",
-      TRUE                      ~ "Late (7\u201312 yrs)"
-    ),
-    dev_stage = factor(dev_stage,
-                       levels = c("Early (0\u20133 yrs)",
-                                  "Middle (3\u20137 yrs)",
-                                  "Late (7\u201312 yrs)"))
-  )
+*Reporting note:* Use `pairs(emmeans_rq2)` output to report the observed–shuffled contrast at each age. Describe the direction and magnitude of the gap at early vs. later ages to characterise the developmental trajectory in plain language.
 
-stage_wrr_tests <- crqa_data_stages %>%
-  group_by(dev_stage) %>%
-  filter(!is.na(wRR), !is.na(wRR_shuf)) %>%
-  summarise(
-    n           = n(),
-    mean_obs    = round(mean(wRR),            5),
-    mean_shuf   = round(mean(wRR_shuf),       5),
-    mean_excess = round(mean(wRR - wRR_shuf), 5),
-    t_stat      = t.test(wRR, wRR_shuf, paired = TRUE,
-                         alternative = "greater")$statistic,
-    df          = t.test(wRR, wRR_shuf, paired = TRUE,
-                         alternative = "greater")$parameter,
-    p_value     = t.test(wRR, wRR_shuf, paired = TRUE,
-                         alternative = "greater")$p.value,
-    .groups     = "drop"
-  ) %>%
-  mutate(
-    p_adj = p.adjust(p_value, method = "fdr"),
-    sig   = case_when(
-      p_adj < 0.001 ~ "***",
-      p_adj < 0.01  ~ "**",
-      p_adj < 0.05  ~ "*",
-      TRUE          ~ "n.s."
-    )
-  )
-
-print(stage_wrr_tests %>% mutate(across(where(is.numeric), ~ round(.x, 5))))
+```{r rq2-emmeans}
+emmeans_rq2 <- emmeans(m_rq2,
+                       ~ condition | target_child_age_yrs,
+                       at = list(target_child_age_yrs = c(2, 4, 6, 8, 10)))
+print(emmeans_rq2)
+pairs(emmeans_rq2)
 ```
 
-### 10c. Distribution plot
+#### B.6. Distribution of Observed WRR
 
 ```{r rq2-dist-plot}
 ggplot(crqa_data, aes(x = wRR)) +
@@ -449,51 +630,98 @@ ggplot(crqa_data, aes(x = wRR)) +
   theme_minimal(base_size = 12)
 ```
 
-### 10d. Coupling by child age
+#### B.7. Model-Predicted Developmental Trajectories (Figure RQ2a-2)
+
+> **INFERENTIAL RESULT.** Predicted WRR for observed and shuffled conditions from `m_rq2`, with 95% CI bands. This is the primary figure for RQ2a.
+
+*Reporting note:* Describe the trajectory in terms of (1) whether observed WRR remains above shuffled across all ages (main effect of condition), and (2) whether the gap narrows, widens, or remains constant across development (interaction). Avoid reporting individual spline coefficients in the narrative.
 
 ```{r rq2-age-plot}
-crqa_data_long <- crqa_data %>%
-  dplyr::select(target_child_age_yrs, wRR, wRR_shuf) %>%
-  pivot_longer(cols = c(wRR, wRR_shuf),
-               names_to  = "condition",
-               values_to = "value") %>%
-  mutate(condition = if_else(condition == "wRR", "Observed", "Shuffled"))
+pred_rq2 <- ggpredict(m_rq2,
+                      terms = c("target_child_age_yrs [all]", "condition"))
 
-library(dplyr)
-library(ggplot2)
-
-ggplot(crqa_data_long, aes(x = target_child_age_yrs, y = value, 
-                           colour = condition, fill = condition,
-                           linetype = condition)) +
-  # GAM smooths - thicker lines for slide visibility
-  geom_smooth(method = "gam", formula = y ~ s(x, k = 4), alpha = 0.2, linewidth = 1.5) +
-  # Numeric Y-axis
-  scale_y_continuous() +
-  # Define line types: Observed is solid, Shuffled is dotted
+ggplot(as.data.frame(pred_rq2),
+       aes(x = x, y = predicted, colour = group, fill = group,
+           linetype = group)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high),
+              alpha = 0.15, colour = NA) +
+  geom_line(linewidth = 1.5) +
   scale_linetype_manual(values = c("Observed" = "solid", "Shuffled" = "dotted")) +
-  # Define colors: Observed is blue, Shuffled is grey
   scale_colour_manual(values = c("Observed" = "#2980b9", "Shuffled" = "grey60")) +
-  scale_fill_manual(values = c("Observed" = "#2980b9", "Shuffled" = "grey60")) +
+  scale_fill_manual(  values = c("Observed" = "#2980b9", "Shuffled" = "grey60")) +
   labs(
-    title  = "Emotion Word Recurrence by Child Age",
-    x      = "Child Age (Years)", 
-    y      = "Windowed Recurrence Rate",
-    colour = NULL, fill = NULL, linetype = NULL
+    title    = "Emotion Word Recurrence by Child Age",
+    subtitle = "Model-estimated trajectories  |  shading = 95% CI",
+    x        = "Child Age (Years)",
+    y        = "Windowed Recurrence Rate",
+    colour   = NULL, fill = NULL, linetype = NULL
   ) +
   theme_minimal(base_size = 18) +
   theme(
-    legend.position = "top",
-    plot.title = element_text(face = "bold"),
-    plot.caption = element_text(hjust = 0, size = 14, face = "italic"),
+    legend.position  = "top",
+    plot.title       = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+```
+
+#### B.8. Post-hoc — Child–Partner Emotion-Word Rate Correlation
+
+> **DESCRIPTIVE RESULT.** This is a post-hoc association check, not a primary hypothesis test. It establishes whether the above-chance WRR could be partially explained by matching emission rates rather than genuine temporal coupling.
+
+Are children who use more emotion words paired with partners who also use more? A Pearson correlation between per-transcript child and partner emotion-word rates quantifies this association.
+
+```{r emo-rate-correlation}
+# ── Pearson correlation: child vs. partner emotion-word rate ──────────────────
+cor_result <- cor.test(crqa_data$child_emo_rate,
+                       crqa_data$partner_emo_rate,
+                       method = "pearson")
+
+cat(sprintf(
+  "r = %.2f, 95%% CI [%.2f, %.2f], t(%d) = %.2f, p %s\n",
+  cor_result$estimate,
+  cor_result$conf.int[1],
+  cor_result$conf.int[2],
+  cor_result$parameter,
+  cor_result$statistic,
+  ifelse(cor_result$p.value < .001, "< .001",
+         sprintf("= %.3f", cor_result$p.value))
+))
+```
+
+```{r emo-rate-scatter}
+ggplot(crqa_data, aes(x = partner_emo_rate, y = child_emo_rate)) +
+  geom_point(alpha = 0.25, size = 1.2, colour = "steelblue") +
+  geom_smooth(method = "lm", colour = "firebrick", linewidth = 1,
+              fill = "firebrick", alpha = 0.15) +
+  annotate("text",
+           x = Inf, y = Inf, hjust = 1.1, vjust = 1.8,
+           label = sprintf("r = %.2f, p < .001", cor_result$estimate),
+           size = 4.5, fontface = "italic") +
+  labs(
+    title = "Child vs. Partner Emotion-Word Rate",
+    x     = "Partner Emotion-Word Rate (proportion of turns)",
+    y     = "Child Emotion-Word Rate (proportion of turns)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title       = element_text(face = "bold"),
     panel.grid.minor = element_blank()
   )
 ```
 
 ------------------------------------------------------------------------
 
-## 11. RQ3 — Directional asymmetry
+## RQ3a. Directionality with the Social Environment Across Development
 
-### 11a. Is there a directional bias?
+The recurrence structure has been characterised in RQ2a. The analyses below test whether emotion word co-occurrence is directionally asymmetric — i.e., whether child-initiated sequences (child leads partner) are more or less frequent than partner-initiated sequences (partner leads child) — and whether the direction or magnitude of this asymmetry changes across development.
+
+The Asymmetry Index (AI = RR at positive lags − RR at negative lags) quantifies directional bias: positive values indicate child leads; negative values indicate partner leads; zero indicates symmetric co-occurrence. The shuffled AI is theoretically ≈ 0 (shuffling destroys temporal order), so the observed–shuffled contrast isolates genuine directional bias from base-rate effects.
+
+------------------------------------------------------------------------
+
+### A. Overall Directional Bias Above Chance
+
+> **INFERENTIAL RESULT.** Overall paired comparison of observed vs. shuffled AI across the full sample.
 
 ```{r rq3-test}
 # Overall paired test: observed asymmetry vs. shuffled asymmetry
@@ -506,273 +734,133 @@ t.test(crqa_data$asymmetry, crqa_data$asymmetry_shuf,
 # sample; use alternative = "greater" if theory predicts child leads on average.
 ```
 
-### 11a NEW: Paired t-tests by developmental stage
+### B. Condition × Age Interaction Model (Primary Inferential Test)
 
-Same logic as 10b-ii: test whether observed AI differs from shuffled AI within each developmental window. Uses `crqa_data_stages` created in Section 10b-ii.
+> **INFERENTIAL RESULT.** The same interaction model structure applied to the Asymmetry Index. `conditionObserved` estimates directional bias above chance. The condition × age interaction tests whether the direction or magnitude of the leader–follower asymmetry changes across development.
 
-```{r rq3-stage-tests}
-stage_ai_tests <- crqa_data_stages %>%
-  group_by(dev_stage) %>%
-  filter(!is.na(asymmetry), !is.na(asymmetry_shuf)) %>%
-  summarise(
-    n            = n(),
-    mean_obs_ai  = round(mean(asymmetry),                    6),
-    mean_shuf_ai = round(mean(asymmetry_shuf),               6),
-    mean_diff    = round(mean(asymmetry - asymmetry_shuf),   6),
-    t_stat       = t.test(asymmetry, asymmetry_shuf,
-                          paired = TRUE)$statistic,
-    df           = t.test(asymmetry, asymmetry_shuf,
-                          paired = TRUE)$parameter,
-    p_value      = t.test(asymmetry, asymmetry_shuf,
-                          paired = TRUE)$p.value,
-    .groups      = "drop"
-  ) %>%
-  mutate(
-    p_adj = p.adjust(p_value, method = "fdr"),
-    sig   = case_when(
-      p_adj < 0.001 ~ "***",
-      p_adj < 0.01  ~ "**",
-      p_adj < 0.05  ~ "*",
-      TRUE          ~ "n.s."
-    )
-  )
-
-print(stage_ai_tests %>% mutate(across(where(is.numeric), ~ round(.x, 6))))
-```
-
-### 11a-ii. Age-block t-tests — does direction shift across development?
-
-A non-significant overall test may mask a developmental reversal: child-leading at younger ages cancelling out partner-leading at older ages (or vice versa). We split the sample into 1-year age bins and run a one-sample t-test against μ = 0 within each bin. P-values are FDR-adjusted across blocks. The plot shows both observed AI and shuffled AI means per block on the same panel with 95% CI error bars.
-
-```{r rq3-age-block-tests}
-crqa_data_blocks <- crqa_data %>%
-  filter(!is.na(target_child_age_yrs), !is.na(asymmetry)) %>%
-  mutate(age_block = cut(
-    target_child_age_yrs,
-    breaks         = seq(floor(min(target_child_age_yrs)),
-                         ceiling(max(target_child_age_yrs)),
-                         by = 1),
-    include.lowest = TRUE,
-    right          = FALSE
-  ))
-
-# Summarise both observed and shuffled AI per block
-block_ai_long <- crqa_data_blocks %>%
-  filter(!is.na(asymmetry_shuf)) %>%
-  group_by(age_block) %>%
-  filter(n() >= 10) %>%
-  pivot_longer(
-    cols      = c(asymmetry, asymmetry_shuf),
-    names_to  = "condition",
-    values_to = "ai"
-  ) %>%
-  mutate(
-    condition = if_else(condition == "asymmetry", "Observed", "Shuffled")
-  ) %>%
-  group_by(age_block, condition) %>%
-  summarise(
-    n        = n(),
-    mean_ai  = mean(ai, na.rm = TRUE),
-    se_ai    = sd(ai, na.rm = TRUE) / sqrt(n()),
-    ci_low   = mean_ai - qt(0.975, df = n() - 1) * se_ai,
-    ci_high  = mean_ai + qt(0.975, df = n() - 1) * se_ai,
-    .groups  = "drop"
-  )
-
-# Per-block one-sample t-tests (unchanged)
-block_tests <- crqa_data_blocks %>%
-  group_by(age_block) %>%
-  filter(n() >= 10) %>%          # require at least 10 transcripts per block
-  summarise(
-    n         = n(),
-    mean_asym = mean(asymmetry_corrected),
-    se_asym   = sd(asymmetry_corrected) / sqrt(n()),
-    t_stat    = t.test(asymmetry_corrected, mu = 0)$statistic,
-    df        = t.test(asymmetry_corrected, mu = 0)$parameter,
-    p_value   = t.test(asymmetry_corrected, mu = 0)$p.value,
-    ci_low    = t.test(asymmetry_corrected, mu = 0)$conf.int[1],
-    ci_high   = t.test(asymmetry_corrected, mu = 0)$conf.int[2],
-    .groups   = "drop"
-  ) %>%
-  mutate(
-    p_adj = p.adjust(p_value, method = "fdr"),
-    sig   = case_when(
-      p_adj < 0.001 ~ "***",
-      p_adj < 0.01  ~ "**",
-      p_adj < 0.05  ~ "*",
-      TRUE          ~ "n.s."
-    )
-  )
-
-print(block_tests %>% mutate(across(where(is.numeric), ~ round(.x, 4))))
-
-# Plot: observed AND shuffled AI per age block on same panel
-ggplot(block_ai_long,
-       aes(x = age_block, y = mean_ai,
-           colour = condition, group = condition)) +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
-  geom_pointrange(
-    aes(ymin = ci_low, ymax = ci_high),
-    position = position_dodge(width = 0.5),
-    linewidth = 0.7, size = 0.6
-  ) +
-  geom_line(
-    aes(linetype = condition),
-    position = position_dodge(width = 0.5),
-    linewidth = 0.6
-  ) +
-  scale_colour_manual(values = c("Observed" = "#2980b9", "Shuffled" = "grey60")) +
-  scale_linetype_manual(values = c("Observed" = "solid",  "Shuffled" = "dotted")) +
-  labs(
-    title    = "Asymmetry index (AI) by 1-year age block",
-    subtitle = paste0(
-      "Observed (blue) vs. shuffled baseline (grey)  |  Positive = child leads\n",
-      "Error bars = 95% CI  |  Point dodge = 0.5 to avoid overlap"
-    ),
-    x      = "Child age (years)",
-    y      = "Mean asymmetry index (RR_pos \u2212 RR_neg)",
-    colour = NULL, linetype = NULL
-  ) +
-  theme_minimal(base_size = 12) +
-  theme(
-    legend.position = "top",
-    axis.text.x     = element_text(angle = 30, hjust = 1)
-  )
-```
-
-### 11b. Does directionality vary with child age?
-
-Predicts the RAW observed asymmetry (rather than `asymmetry_corrected`), so both the response and plots remain on the original AI scale (RR_pos − RR_neg). An optional controlled model includes the shuffled AI as a covariate to partial out base-rate contributions at the model level rather than by subtraction.
+*Reporting note:* Report `conditionObserved` coefficient (directional bias averaged over development) and the LRT in C. Describe the result in terms of which partner role (child or partner) leads, not in terms of spline coefficients.
 
 ```{r rq3-model}
 m_rq3 <- lmer(
-  asymmetry ~
-    ns(target_child_age_yrs, df = 3) +
+  asym_value ~
+    condition * ns(target_child_age_yrs, df = 3) +
     target_child_sex +
     (1 | corpus_name) +
-    (1 | target_child_id),
-  data    = crqa_data,
-  REML    = TRUE
+    (1 | target_child_id) +
+    (1 | transcript_id),
+  data = crqa_long_asym,
+  REML = TRUE
 )
 summary(m_rq3)
+confint(m_rq3, method = "Wald")
 
-# Optional: include shuffled AI as a covariate to remove base-rate confound
-# at the model level rather than by subtraction
-m_rq3_controlled <- lmer(
-  asymmetry ~
-    asymmetry_shuf +                       # base-rate covariate
+# Manipulation check: is shuffled AI indistinguishable from zero across age?
+m_shuf_ai <- lmer(
+  asym_value ~ ns(target_child_age_yrs, df = 3) +
+    (1 | corpus_name) + (1 | target_child_id),
+  data   = dplyr::filter(crqa_long_asym, condition == "Shuffled"),
+  REML   = TRUE
+)
+confint(m_shuf_ai, method = "Wald")
+```
+
+### C. Omnibus Test — Does Directional Bias Change Across Development?
+
+> **INFERENTIAL RESULT.** Primary test for RQ3. A 3-df likelihood-ratio test on the interaction block tests whether the AI trajectory differs between observed and shuffled conditions — i.e., whether directional bias changes across age.
+
+*Reporting note:* Report χ²(3), p. If significant, use emmeans (D) and the trajectory figure (F) to describe the developmental change. If non-significant, report that directional bias was developmentally stable and cite the overall bias from section A.
+
+```{r rq3-lrt}
+m_rq3_main <- lmer(
+  asym_value ~
+    condition + ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 | corpus_name) + (1 | target_child_id) + (1 | transcript_id),
+  data = crqa_long_asym, REML = FALSE
+)
+m_rq3_inter <- lmer(
+  asym_value ~
+    condition * ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 | corpus_name) + (1 | target_child_id) + (1 | transcript_id),
+  data = crqa_long_asym, REML = FALSE
+)
+anova(m_rq3_main, m_rq3_inter)
+```
+
+### D. Estimated Marginal Means at Key Ages
+
+> **INFERENTIAL RESULT.** Observed vs. shuffled AI at representative ages (2, 4, 6, 8, 10 years). Use `pairs(emmeans_rq3)` to report the directional contrast at each age.
+
+```{r rq3-emmeans}
+emmeans_rq3 <- emmeans(m_rq3,
+                       ~ condition | target_child_age_yrs,
+                       at = list(target_child_age_yrs = c(2, 4, 6, 8, 10)))
+print(emmeans_rq3)
+pairs(emmeans_rq3)
+```
+
+### E. Supplementary — Difference Score Model (RQ3)
+
+> **SUPPLEMENTARY.** Secondary to B–D. The corrected asymmetry (`asymmetry_corrected`) directly quantifies above-chance directional bias. Since the shuffled AI ≈ 0, this is nearly equivalent to the raw observed AI but removes any residual base-rate contribution.
+
+```{r rq3-excess-model}
+m_rq3_corrected <- lmer(
+  asymmetry_corrected ~
     ns(target_child_age_yrs, df = 3) +
     target_child_sex +
-    (1 | corpus_name) +
-    (1 | target_child_id),
-  data    = crqa_data,
-  REML    = TRUE
+    (1 | corpus_name) + (1 | target_child_id),
+  data = crqa_data, REML = TRUE
 )
-summary(m_rq3_controlled)
+summary(m_rq3_corrected)
+confint(m_rq3_corrected, method = "Wald")
 
-# Plot: predicted observed AI across age (from m_rq3), 95% CI shaded
-pred_asym <- ggpredict(m_rq3, terms = "target_child_age_yrs [all]")
-
-plot(pred_asym) +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
-  labs(
-    title    = "Predicted asymmetry index by child age",
-    subtitle = "Mixed model: asymmetry ~ ns(age, df=3) + sex + (1|child_id)  |  shading = 95% CI",
-    x        = "Child age (years)",
-    y        = "Predicted asymmetry index (AI)"
-  ) +
-  theme_minimal(base_size = 12)
+# LRT: does above-chance directional bias change across development?
+m_rq3_corr_null <- lmer(
+  asymmetry_corrected ~ 1 + target_child_sex +
+    (1 | corpus_name) + (1 | target_child_id),
+  data = crqa_data, REML = FALSE
+)
+m_rq3_corr_age <- lmer(
+  asymmetry_corrected ~ ns(target_child_age_yrs, df = 3) + target_child_sex +
+    (1 | corpus_name) + (1 | target_child_id),
+  data = crqa_data, REML = FALSE
+)
+anova(m_rq3_corr_null, m_rq3_corr_age)
 ```
 
-### 11c. Mean recurrence profile across all transcripts
+### F-prelim. Note on Recurrence Profile
 
-Observed (red) and shuffled baseline (blue) are shown as separate bands. Where the red band sits clearly above the blue, recurrence exceeds chance. Asymmetry between the two sides of lag 0 indicates directionality.
+> The aggregate cross-recurrence profile (observed vs. shuffled across lags −W to +W) was characterised in **RQ2a, Section A** (Figure RQ2a-1). The profile objects `profile_all`, `profile_shuf`, and `profile_combined` were computed there and are available for use here. Visual asymmetry around lag 0 in Figure RQ2a-1 motivates the Asymmetry Index analyses below.
+>
+> The directional profile for each partner type is shown in **RQ3b, Section A** (Figure RQ3b-1).
 
-```{r rq3-profile-plot}
-# Observed profile
-profile_all <- map_dfr(seq_len(nrow(crqa_series_f)), function(i) {
-  cs <- unlist(crqa_series_f$child_series[[i]])
-  ps <- unlist(crqa_series_f$partner_series[[i]])
-  na <- crqa_series_f$n_aligned[i]
+### F. Model-Predicted Developmental Trajectories (Figure RQ3a-1)
 
-  recurrence_profile(cs[1:na], ps[1:na], W = WINDOW_W) %>%
-    mutate(
-      RR            = co / n_cells,
-      transcript_id = crqa_series_f$transcript_id[i]
-    )
-})
+> **INFERENTIAL RESULT.** Predicted AI for observed and shuffled conditions from `m_rq3`, with 95% CI bands. This is the primary figure for RQ3a.
 
-# Shuffled profile (same shuffle used in Section 9)
-set.seed(42)
-profile_shuf <- map_dfr(seq_len(nrow(crqa_series_f)), function(i) {
-  cs_shuf <- sample(unlist(crqa_series_f$child_series[[i]]))
-  ps      <- unlist(crqa_series_f$partner_series[[i]])
-  na      <- crqa_series_f$n_aligned[i]
-
-  recurrence_profile(cs_shuf[1:na], ps[1:na], W = WINDOW_W) %>%
-    mutate(
-      RR            = co / n_cells,
-      transcript_id = crqa_series_f$transcript_id[i]
-    )
-})
-
-# Summarise both
-summarise_profile <- function(df, condition) {
-  df %>%
-    group_by(lag) %>%
-    summarise(
-      mean_RR = mean(RR, na.rm = TRUE),
-      se_RR   = sd(RR,   na.rm = TRUE) / sqrt(n()),
-      .groups = "drop"
-    ) %>%
-    mutate(condition = condition)
-}
-
-profile_combined <- bind_rows(
-  summarise_profile(profile_all,  "Observed"),
-  summarise_profile(profile_shuf, "Shuffled")
-)
-
-ggplot(profile_combined, aes(x = lag, y = mean_RR,
-                              colour = condition, fill = condition)) +
-  geom_ribbon(aes(ymin = mean_RR - se_RR, ymax = mean_RR + se_RR),
-              alpha = 0.2, colour = NA) +
-  geom_line(linewidth = 1) +
-  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey40") +
-  scale_colour_manual(values = c("Observed" = "#c0392b", "Shuffled" = "#2980b9")) +
-  scale_fill_manual(  values = c("Observed" = "#c0392b", "Shuffled" = "#2980b9")) +
-  scale_x_continuous(breaks = seq(-WINDOW_W, WINDOW_W, by = 2)) +
-  labs(
-    title    = "Mean cross-recurrence profile across all transcripts",
-    subtitle = "Positive lag: child leads | Lag ≤ 0: partner leads  |  (1,1) only",
-    x        = "Lag (turns)", y = "Mean recurrence rate",
-    colour   = NULL, fill = NULL
-  ) +
-  theme_minimal(base_size = 12) +
-  theme(legend.position = "top")
-```
-
-### 11d. Corrected asymmetry by child age
+The shuffled curve is expected to remain near zero across all ages (manipulation check). Deviation of the observed curve from zero indicates directional bias above chance; the developmental shape of this deviation (constant, increasing, or decreasing) is the primary finding for RQ3.
 
 ```{r rq3-age-plot}
-crqa_asym_long <- crqa_data %>%
-  dplyr::select(target_child_age_yrs, asymmetry, asymmetry_shuf) %>%
-  pivot_longer(cols = c(asymmetry, asymmetry_shuf),
-               names_to  = "condition",
-               values_to = "value") %>%
-  mutate(condition = if_else(condition == "asymmetry", "Observed", "Shuffled"))
+pred_rq3 <- ggpredict(m_rq3,
+                      terms = c("target_child_age_yrs [all]", "condition"))
 
-ggplot(crqa_asym_long, aes(x = target_child_age_yrs, y = value,
-                            colour = condition, fill = condition)) +
+ggplot(as.data.frame(pred_rq3),
+       aes(x = x, y = predicted, colour = group, fill = group,
+           linetype = group)) +
   geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
-  geom_smooth(method = "gam", formula = y ~ s(x, k = 4), alpha = 0.2) +
-  scale_colour_manual(values = c("Observed" = "#2980b9", "Shuffled" = "#c0392b")) +
-  scale_fill_manual(  values = c("Observed" = "#2980b9", "Shuffled" = "#c0392b")) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high),
+              alpha = 0.15, colour = NA) +
+  geom_line(linewidth = 1.2) +
+  scale_linetype_manual(values = c("Observed" = "solid", "Shuffled" = "dotted")) +
+  scale_colour_manual(values = c("Observed" = "#2980b9", "Shuffled" = "grey60")) +
+  scale_fill_manual(  values = c("Observed" = "#2980b9", "Shuffled" = "grey60")) +
   labs(
     title    = "Directional asymmetry by child age",
-    subtitle = "Positive = child leads | Negative = partner leads",
-    x        = "Child age (years)", y = "Asymmetry (RR_pos − RR_neg)",
-    colour   = NULL, fill = NULL
+    subtitle = "Model-estimated trajectories  |  Positive = child leads  |  shading = 95% CI",
+    x        = "Child age (years)",
+    y        = "Asymmetry Index (RR_pos − RR_neg)",
+    colour   = NULL, fill = NULL, linetype = NULL
   ) +
   theme_minimal(base_size = 12) +
   theme(legend.position = "top")
@@ -854,9 +942,14 @@ Re-run the full turn-building → partner-first alignment → binary-series pipe
 ```{r dyadic-series}
 # Attach partner_type to utterance-level data
 crqa_all_dyadic <- crqa_all %>%
- dplyr::filter (transcript_id %in% dyadic_ids_f$transcript_id) %>%
-  dplyr::left_join(dyadic_ids_f %>% dplyr::select(transcript_id, partner_type),
-            by = "transcript_id")
+  mutate(transcript_id = as.character(transcript_id)) %>%
+  filter(transcript_id %in% as.character(dyadic_ids_f$transcript_id)) %>%
+  left_join(
+    dyadic_ids_f %>%
+      mutate(transcript_id = as.character(transcript_id)) %>%
+      select(transcript_id, partner_type),
+    by = "transcript_id"
+  )
 
 # Turn building (same logic as Section 3)
 crqa_turns_dyadic <- crqa_all_dyadic %>%
@@ -931,8 +1024,12 @@ if (nrow(below_threshold) > 0) {
 # Fix target_child_age: first() in the turn summarise picks up partner rows where age
 # is NA (CHILDES stores age only on child-speaker rows). Reuse age_lookup from Section 9.
 crqa_series_dyadic_f <- crqa_series_dyadic_f %>%
- dplyr::select(-target_child_age, -target_child_sex, -target_child_id) %>%
-   dplyr::left_join(age_lookup, by = "transcript_id")
+  mutate(transcript_id = as.character(transcript_id)) %>%
+  dplyr::select(-target_child_age, -target_child_sex, -target_child_id) %>%
+  dplyr::left_join(
+    age_lookup,
+    by = "transcript_id"
+  )
 
 cat("\nNA in target_child_age after fix:", sum(is.na(crqa_series_dyadic_f$target_child_age)), "\n")
 ```
@@ -965,6 +1062,20 @@ crqa_series_dyadic_f %>%
     min_age_years  = round(min(target_child_age, na.rm = TRUE) / 12, 1),
     max_age_years  = round(max(target_child_age, na.rm = TRUE) / 12, 1)
   )
+
+crqa_partner_demo <- crqa_series_dyadic_f %>%
+  group_by(partner_type) %>%
+  summarise(
+    n_transcripts = n_distinct(transcript_id),
+    n_children    = n_distinct(target_child_id),
+    min_age_yrs   = round(min(target_child_age, na.rm = TRUE) / 12, 2),
+    max_age_yrs   = round(max(target_child_age, na.rm = TRUE) / 12, 2),
+    .groups = "drop"
+  ) %>%
+  mutate(age_range = paste0(min_age_yrs, "\u2013", max_age_yrs)) %>%
+  arrange(desc(n_transcripts))
+
+print(crqa_partner_demo)
 
 # ── BY PARTNER TYPE: Sex breakdown ────────────────────────────────────────
 
@@ -1041,14 +1152,20 @@ crqa_shuffled_dyadic <- map_dfr(seq_len(nrow(crqa_series_dyadic_f)), function(i)
 # Combine and compute excess / corrected asymmetry
 # Re-join age_lookup to guarantee non-NA age (see fix in Section 15)
 crqa_data_dyadic <- crqa_results_dyadic %>%
-  dplyr::left_join(crqa_shuffled_dyadic, by = "transcript_id") %>%
-  dplyr::select(-target_child_age, -target_child_sex, -target_child_id) %>%
-  dplyr::left_join(age_lookup, by = "transcript_id") %>%
+  mutate(transcript_id = as.character(transcript_id)) %>%
+  left_join(
+    crqa_shuffled_dyadic %>%
+      mutate(transcript_id = as.character(transcript_id)),
+    by = "transcript_id"
+  ) %>%
+  select(-target_child_age, -target_child_sex, -target_child_id) %>%
+  left_join(age_lookup, by = "transcript_id") %>%
   mutate(
-    wRR_excess           = wRR - wRR_shuf,
-    asymmetry_corrected  = (RR_pos - RR_pos_shuf) - (RR_neg - RR_neg_shuf),
+    wRR_excess = wRR - wRR_shuf,
+    asymmetry_corrected = (RR_pos - RR_pos_shuf) -
+      (RR_neg - RR_neg_shuf),
     target_child_age_yrs = target_child_age / 12,
-    partner_type         = factor(partner_type)
+    partner_type = factor(partner_type)
   )
 
 cat("Dyadic CRQA data rows:", nrow(crqa_data_dyadic), "\n")
@@ -1066,13 +1183,223 @@ crqa_data_dyadic %>%
 
 ------------------------------------------------------------------------
 
-## 17. Compare CRQA across partner categories
+## RQ2b. Temporal Contingency Across Partner Types
 
-### 17a. Observed wRR by child age, per partner type
+```{r partner-colours}
+# Shared colour palette — defined once, reused in every section-17 plot
+partner_cols <- c(
+  "Mother"      = "#57b403",
+  "Father"      = "#a58aff",
+  "Known Adult" = "#c59a00",
+  "Other Adult" = "#06b6eb"
+)
+```
+
+### A. Partner-Specific Recurrence Profile
+
+> **DESCRIPTIVE RESULT.** The following section characterises mean recurrence across lags separately for each partner type. No developmental inference is drawn here.
+
+```{r partner-profile}
+# Compute observed recurrence profile per dyadic transcript
+profile_partner_obs <- map_dfr(seq_len(nrow(crqa_series_dyadic_f)), function(i) {
+  cs <- unlist(crqa_series_dyadic_f$child_series[[i]])
+  ps <- unlist(crqa_series_dyadic_f$partner_series[[i]])
+  na <- crqa_series_dyadic_f$n_aligned[i]
+
+  recurrence_profile(cs[1:na], ps[1:na], W = WINDOW_W) %>%
+    mutate(
+      RR           = co / n_cells,
+      transcript_id = crqa_series_dyadic_f$transcript_id[i],
+      partner_type  = crqa_series_dyadic_f$partner_type[i]
+    )
+})
+
+# Shuffled baseline per dyadic transcript (same seed)
+set.seed(42)
+profile_partner_shuf <- map_dfr(seq_len(nrow(crqa_series_dyadic_f)), function(i) {
+  cs_shuf <- sample(unlist(crqa_series_dyadic_f$child_series[[i]]))
+  ps      <- unlist(crqa_series_dyadic_f$partner_series[[i]])
+  na      <- crqa_series_dyadic_f$n_aligned[i]
+
+  recurrence_profile(cs_shuf[1:na], ps[1:na], W = WINDOW_W) %>%
+    mutate(
+      RR            = co / n_cells,
+      transcript_id = crqa_series_dyadic_f$transcript_id[i],
+      partner_type  = crqa_series_dyadic_f$partner_type[i]
+    )
+})
+
+# Summarise by partner type and lag
+profile_partner_combined <- bind_rows(
+  profile_partner_obs %>%
+    group_by(partner_type, lag) %>%
+    summarise(mean_RR = mean(RR, na.rm = TRUE),
+              se_RR   = sd(RR,   na.rm = TRUE) / sqrt(n()),
+              .groups = "drop") %>%
+    mutate(condition = "Observed"),
+  profile_partner_shuf %>%
+    group_by(partner_type, lag) %>%
+    summarise(mean_RR = mean(RR, na.rm = TRUE),
+              se_RR   = sd(RR,   na.rm = TRUE) / sqrt(n()),
+              .groups = "drop") %>%
+    mutate(condition = "Shuffled")
+)
+
+# Peak RR per partner type (observed only)
+profile_partner_obs %>%
+  group_by(partner_type, lag) %>%
+  summarise(mean_RR = mean(RR, na.rm = TRUE), .groups = "drop") %>%
+  group_by(partner_type) %>%
+  slice_max(mean_RR, n = 1) %>%
+  arrange(desc(mean_RR))
+```
+
+```{r fig-rq2b-profile}
+# Figure RQ2b-1. Partner-specific cross-recurrence profile
+ggplot(profile_partner_combined,
+       aes(x = lag, y = mean_RR, colour = condition, fill = condition)) +
+  geom_ribbon(aes(ymin = mean_RR - se_RR, ymax = mean_RR + se_RR),
+              alpha = 0.2, colour = NA) +
+  geom_line(linewidth = 0.9) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey40") +
+  facet_wrap(~ partner_type, ncol = 2, scales = "free_y") +
+  scale_colour_manual(values = c("Observed" = "#2980b9", "Shuffled" = "grey60")) +
+  scale_fill_manual(  values = c("Observed" = "#2980b9", "Shuffled" = "grey60")) +
+  scale_x_continuous(breaks = seq(-WINDOW_W, WINDOW_W, by = 2)) +
+  labs(
+    title    = "Figure RQ2b-1. Cross-recurrence profile by partner type",
+    subtitle = "Lag > 0: child leads  |  Lag ≤ 0: partner leads  |  shading = ±1 SE",
+    x        = "Lag (turns)", y = "Mean RR",
+    colour   = NULL, fill = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top",
+        strip.text      = element_text(face = "bold"))
+```
+
+*Reporting note (fill in after running):* For each partner type, describe (1) the peak lag, (2) whether the observed profile is clearly elevated above the shuffled baseline, and (3) qualitative differences across partner types (e.g., whether mother–child dyads show a narrower or broader concentration of recurrence than other–adult dyads).
+
+------------------------------------------------------------------------
+
+### B. Developmental Trajectories by Partner Type
+
+> **INFERENTIAL RESULT.** Mixed-effects models test whether WRR developmental trajectories differ across partner types, and whether the partner-specific observed–shuffled gap changes across age.
+
+#### B.1. Long-format dyadic data (observed + shuffled)
+
+```{r dyadic-long-wrr}
+crqa_dyadic_long_wrr <- crqa_data_dyadic %>%
+  pivot_longer(
+    cols      = c(wRR, wRR_shuf),
+    names_to  = "condition",
+    values_to = "wRR_value"
+  ) %>%
+  mutate(
+    condition = factor(
+      if_else(condition == "wRR", "Observed", "Shuffled"),
+      levels = c("Shuffled", "Observed")
+    )
+  )
+
+cat("Dyadic long-format rows (WRR):", nrow(crqa_dyadic_long_wrr), "\n")
+```
+
+#### B.2. Three-way model — partner type × condition × age
+
+This model tests: (a) whether partner types differ in observed WRR trajectory (partner_type × age); (b) whether above-chance coupling differs across partner types (partner_type × condition); (c) whether the developmental trajectory of above-chance coupling differs across partner types (partner_type × condition × age).
+
+*Note: Father and Known Adult have limited sample sizes (see Section 15b). Models restricted to Mother vs. Other Adult (B.3) provide the cleanest test of trajectory differences.*
+
+```{r rq2b-full-model}
+crqa_dyadic_long_wrr <- crqa_dyadic_long_wrr %>%
+  mutate(partner_type = relevel(factor(partner_type), ref = "Mother"))
+
+m_rq2b_full <- lmer(
+  wRR_value ~
+    partner_type * condition * ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 | corpus_name) + (1 | target_child_id) + (1 | transcript_id),
+  data = crqa_dyadic_long_wrr,
+  REML = FALSE
+)
+# Note any convergence warnings
+summary(m_rq2b_full)
+```
+
+```{r rq2b-lrt}
+# LRT: does the partner × condition × age three-way interaction improve fit?
+m_rq2b_twoway <- lmer(
+  wRR_value ~
+    (partner_type + condition + ns(target_child_age_yrs, df = 3))^2 +
+    target_child_sex +
+    (1 | corpus_name) + (1 | target_child_id) + (1 | transcript_id),
+  data = crqa_dyadic_long_wrr,
+  REML = FALSE
+)
+anova(m_rq2b_twoway, m_rq2b_full)
+```
+
+#### B.3. Restricted model — Mother vs. Other Adult
+
+```{r rq2b-restricted}
+crqa_mo_long <- crqa_dyadic_long_wrr %>%
+  filter(partner_type %in% c("Mother", "Other Adult")) %>%
+  mutate(partner_type = relevel(droplevels(partner_type), ref = "Mother"))
+
+m_rq2b_mo <- lmer(
+  wRR_value ~
+    partner_type * condition * ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 | corpus_name) + (1 | target_child_id) + (1 | transcript_id),
+  data = crqa_mo_long,
+  REML = FALSE
+)
+summary(m_rq2b_mo)
+
+# LRT: three-way vs. two-way
+m_rq2b_mo_twoway <- lmer(
+  wRR_value ~
+    (partner_type + condition + ns(target_child_age_yrs, df = 3))^2 +
+    target_child_sex +
+    (1 | corpus_name) + (1 | target_child_id) + (1 | transcript_id),
+  data = crqa_mo_long,
+  REML = FALSE
+)
+anova(m_rq2b_mo_twoway, m_rq2b_mo)
+
+# Refit with REML for final estimates
+m_rq2b_mo_reml <- update(m_rq2b_mo, REML = TRUE)
+confint(m_rq2b_mo_reml, method = "Wald")
+```
+
+```{r fig-rq2b-trajectories}
+# Figure RQ2b-2. Partner-specific WRR trajectories (observed vs. shuffled)
+ggpredict(m_rq2b_mo_reml,
+          terms = c("target_child_age_yrs [all]", "condition", "partner_type")) %>%
+  as.data.frame() %>%
+  ggplot(aes(x = x, y = predicted, colour = group, fill = group, linetype = group)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.15, colour = NA) +
+  geom_line(linewidth = 0.9) +
+  facet_wrap(~ facet, ncol = 2) +
+  scale_linetype_manual(values = c("Observed" = "solid", "Shuffled" = "dotted")) +
+  scale_colour_manual(values = c("Observed" = "#2980b9", "Shuffled" = "grey60")) +
+  scale_fill_manual(  values = c("Observed" = "#2980b9", "Shuffled" = "grey60")) +
+  labs(
+    title    = "Figure RQ2b-2. WRR developmental trajectories by partner type",
+    subtitle = "Model-estimated (Mother vs. Other Adult)  |  shading = 95% CI",
+    x = "Child age (years)", y = "WRR",
+    colour = NULL, fill = NULL, linetype = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top", strip.text = element_text(face = "bold"))
+```
+
+### C. Supplementary — GAM Smooth by Partner Type (Observed Only)
+
+> **SUPPLEMENTARY DESCRIPTIVE.** GAM smooths of observed WRR by partner type, without the shuffled condition overlay. The condition × age interaction models (B.2–B.3) are the primary inferential analyses. This plot provides a descriptive complement.
 
 ```{r partner-wrr-age-plot}
 ggplot() +
-  # Single pooled shuffled baseline from full-sample analysis (Section 9)
   geom_smooth(
     data    = crqa_data,
     mapping = aes(x = target_child_age_yrs, y = wRR_shuf,
@@ -1080,7 +1407,6 @@ ggplot() +
     method  = "gam", formula = y ~ s(x, k = 4),
     colour  = "grey50", fill = "grey70", alpha = 0.25, linewidth = 0.9
   ) +
-  # Observed wRR coloured by partner type
   geom_smooth(
     data    = crqa_data_dyadic,
     mapping = aes(x = target_child_age_yrs, y = wRR,
@@ -1089,58 +1415,31 @@ ggplot() +
     alpha = 0.15, linewidth = 1.1
   ) +
   scale_linetype_manual(name = NULL, values = c("Shuffled baseline" = "dashed")) +
+  scale_colour_manual(name = "Partner type", values = partner_cols) +
+  scale_fill_manual(  name = "Partner type", values = partner_cols) +
   labs(
-    title    = "Emotion-word co-occurrence (wRR) by child age and partner type",
+    title    = "WRR by child age and partner type",
     subtitle = "Coloured = observed per partner  |  Grey = pooled shuffled baseline  |  GAM smooth  |  dyadic transcripts only",
-    x = "Child age (years)", y = "Observed wRR",
-    colour = "Partner type", fill = "Partner type"
+    x = "Child age (years)", y = "Observed WRR"
   ) +
   theme_minimal(base_size = 12) +
   theme(legend.position = "top")
 ```
 
-### 17b. Corrected asymmetry by child age, per partner type
+### D. Supplementary — Observed-Only Partner × Age Model
 
-```{r partner-asym-age-plot}
-ggplot() +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
-  # Single pooled shuffled baseline from full-sample analysis (Section 9)
-  geom_smooth(
-    data    = crqa_data,
-    mapping = aes(x = target_child_age_yrs, y = asymmetry_shuf,
-                  linetype = "Shuffled baseline"),
-    method  = "gam", formula = y ~ s(x, k = 4),
-    colour  = "grey50", fill = "grey70", alpha = 0.25, linewidth = 0.9
-  ) +
-  # Observed asymmetry coloured by partner type
-  geom_smooth(
-    data    = crqa_data_dyadic,
-    mapping = aes(x = target_child_age_yrs, y = asymmetry,
-                  colour = partner_type, fill = partner_type),
-    method  = "gam", formula = y ~ s(x, k = 4),
-    alpha = 0.15, linewidth = 1.1
-  ) +
-  scale_linetype_manual(name = NULL, values = c("Shuffled baseline" = "dashed")) +
-  labs(
-    title    = "Directional asymmetry by child age and partner type",
-    subtitle = "Positive = child leads | Negative = partner leads\nColoured = observed per partner  |  Grey = pooled shuffled baseline  |  GAM smooth  |  dyadic transcripts only",
-    x = "Child age (years)", y = "Asymmetry index (RR_pos − RR_neg)",
-    colour = "Partner type", fill = "Partner type"
-  ) +
-  theme_minimal(base_size = 12) +
-  theme(legend.position = "top")
-```
+> **SUPPLEMENTARY INFERENTIAL.** This model uses observed WRR only (no shuffled condition). It is supplementary to the condition × age interaction models in B.2–B.3, which are the primary inferential analyses for RQ2b.
 
-### 17c. Mixed model — does wRR excess differ by partner type?
+`Mother` is used as the reference level. The model includes a `partner_type × age` interaction to test whether developmental trajectories differ across partner categories.
 
-`Mother` is used as the reference level. The random intercept for `target_child_id` accounts for children contributing multiple transcripts. The model includes a `partner_type × age` interaction to test whether developmental trajectories differ across partner categories.
+> **Interpretation note.** In an interaction model the `partner_type` main-effect coefficients are *intercept contrasts* at the natural spline's reference point (approximately the lower boundary of the age range), not average differences across the full developmental span. Non-significant interaction terms mean trajectory *shapes* do not differ significantly, even if the intercept contrast is significant.
 
 ```{r partner-wrr-model}
 crqa_data_dyadic <- crqa_data_dyadic %>%
   mutate(partner_type = relevel(partner_type, ref = "Mother"))
 
 m_partner_wrr <- lmer(
-  wRR_excess ~
+  wRR ~
     partner_type * ns(target_child_age_yrs, df = 3) +
     target_child_sex +
     (1 | corpus_name) +
@@ -1150,9 +1449,239 @@ m_partner_wrr <- lmer(
 )
 summary(m_partner_wrr)
 
-# Likelihood-ratio test: is the interaction warranted?
-m_partner_wrr_noint <- lmer(
-  wRR_excess ~
+# LRT: is the interaction warranted?
+anova(
+  update(m_partner_wrr, . ~ partner_type + ns(target_child_age_yrs, df = 3) +
+           target_child_sex + (1 | corpus_name) + (1 | target_child_id), REML = FALSE),
+  update(m_partner_wrr, REML = FALSE)
+)
+```
+
+```{r partner-wrr-model-plot, message=FALSE}
+ggplot(
+  ggeffects::ggpredict(m_partner_wrr,
+                       terms = c("target_child_age_yrs [all]", "partner_type")) %>%
+    as.data.frame(),
+  aes(x = x, y = predicted, colour = group, fill = group)
+) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.15, colour = NA) +
+  geom_line(linewidth = 0.9) +
+  geom_line(
+    data = crqa_data_dyadic %>%
+      mutate(age_bin = round(target_child_age_yrs, 1)) %>%
+      group_by(partner_type, age_bin) %>%
+      summarise(mean_shuf = mean(wRR_shuf, na.rm = TRUE), .groups = "drop"),
+    mapping = aes(x = age_bin, y = mean_shuf, colour = partner_type),
+    linetype = "dashed", linewidth = 0.6, inherit.aes = FALSE
+  ) +
+  scale_colour_manual(name = "Partner type", values = partner_cols) +
+  scale_fill_manual(  name = "Partner type", values = partner_cols) +
+  labs(
+    title    = "Observed WRR (solid) vs. shuffled baseline (dashed) by partner type",
+    subtitle = "Model-estimated trajectories  |  partner_type × age interaction  |  shading = 95% CI",
+    x = "Child age (years)", y = "WRR"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top")
+```
+
+### E. Supplementary — Restricted Observed-Only Model (Mother vs. Other Adult)
+
+Father (14 children) and Known Adult (4 children, 2–5.4 yr) have insufficient data to estimate a trajectory interaction reliably; Known Adult interaction terms are dropped by lmer due to rank deficiency. This model restricts to the two groups with adequate age coverage (Mother, Other Adult) to obtain an unconfounded test of trajectory difference.
+
+```{r partner-wrr-restricted}
+crqa_mo <- crqa_data_dyadic %>%
+  filter(partner_type %in% c("Mother", "Other Adult")) %>%
+  mutate(partner_type = relevel(droplevels(partner_type), ref = "Mother"))
+
+m_wrr_mo <- lmer(
+  wRR ~
+    partner_type * ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 | corpus_name) +
+    (1 | target_child_id),
+  data = crqa_mo,
+  REML = TRUE
+)
+summary(m_wrr_mo)
+
+# LRT: interaction warranted?
+anova(
+  update(m_wrr_mo, . ~ partner_type + ns(target_child_age_yrs, df = 3) +
+           target_child_sex + (1 | corpus_name) + (1 | target_child_id), REML = FALSE),
+  update(m_wrr_mo, REML = FALSE)
+)
+```
+
+```{r partner-wrr-restricted-plot, message=FALSE}
+ggplot(
+  ggeffects::ggpredict(m_wrr_mo,
+                       terms = c("target_child_age_yrs [all]", "partner_type")) %>%
+    as.data.frame(),
+  aes(x = x, y = predicted, colour = group, fill = group)
+) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.15, colour = NA) +
+  geom_line(linewidth = 0.9) +
+  geom_line(
+    data = crqa_mo %>%
+      mutate(age_bin = round(target_child_age_yrs, 1)) %>%
+      group_by(partner_type, age_bin) %>%
+      summarise(mean_shuf = mean(wRR_shuf, na.rm = TRUE), .groups = "drop"),
+    mapping = aes(x = age_bin, y = mean_shuf, colour = partner_type),
+    linetype = "dashed", linewidth = 0.6, inherit.aes = FALSE
+  ) +
+  scale_colour_manual(name = "Partner type", values = partner_cols) +
+  scale_fill_manual(  name = "Partner type", values = partner_cols) +
+  labs(
+    title    = "Observed WRR by age: Mother vs. Other Adult (restricted model)",
+    subtitle = "Model-estimated trajectories  |  partner_type × age interaction  |  shading = 95% CI",
+    x = "Child age (years)", y = "WRR"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top")
+```
+
+------------------------------------------------------------------------
+
+## RQ3b. Directionality Across Partner Types
+
+The recurrence profile for each partner type was characterised in RQ2b, Section A (Figure RQ2b-1). The directional asymmetry between the positive-lag and negative-lag sides of each profile indicates whether a given partner type tends to follow or lead the child's emotion words.
+
+The analyses below test whether directional bias (Asymmetry Index) differs across partner types, and whether the developmental trajectory of directional bias differs by partner.
+
+### A. Partner-Specific Directionality Profile
+
+> **DESCRIPTIVE RESULT.** The lag profiles from Figure RQ2b-1 already show directional structure within each partner type. The table below quantifies mean AI and corrected AI (above-chance directional bias) per partner type.
+
+```{r rq3b-descriptive}
+crqa_data_dyadic %>%
+  group_by(partner_type) %>%
+  summarise(
+    n               = n(),
+    mean_AI_obs     = round(mean(asymmetry, na.rm = TRUE), 5),
+    mean_AI_shuf    = round(mean(asymmetry_shuf, na.rm = TRUE), 5),
+    mean_AI_corr    = round(mean(asymmetry_corrected, na.rm = TRUE), 5),
+    sd_AI_corr      = round(sd(asymmetry_corrected, na.rm = TRUE), 5),
+    .groups = "drop"
+  )
+```
+
+*Reporting note (fill in after running):* For each partner type, note whether mean AI is positive (child leads) or negative (partner leads), and whether the corrected AI (above chance) is appreciably different from zero. Qualitative comparison across partner types motivates the inferential model below.
+
+------------------------------------------------------------------------
+
+### B. Developmental Change in Directionality Across Partner Types
+
+> **INFERENTIAL RESULT.**
+
+#### B.1. Long-format dyadic data (observed + shuffled AI)
+
+```{r dyadic-long-asym}
+crqa_dyadic_long_asym <- crqa_data_dyadic %>%
+  pivot_longer(
+    cols      = c(asymmetry, asymmetry_shuf),
+    names_to  = "condition",
+    values_to = "asym_value"
+  ) %>%
+  mutate(
+    condition = factor(
+      if_else(condition == "asymmetry", "Observed", "Shuffled"),
+      levels = c("Shuffled", "Observed")
+    ),
+    partner_type = relevel(factor(partner_type), ref = "Mother")
+  )
+
+cat("Dyadic long-format rows (Asymmetry):", nrow(crqa_dyadic_long_asym), "\n")
+```
+
+#### B.2. Restricted model — Mother vs. Other Adult (condition × partner × age)
+
+```{r rq3b-model}
+crqa_asym_mo_long <- crqa_dyadic_long_asym %>%
+  filter(partner_type %in% c("Mother", "Other Adult")) %>%
+  mutate(partner_type = relevel(droplevels(partner_type), ref = "Mother"))
+
+m_rq3b_mo <- lmer(
+  asym_value ~
+    partner_type * condition * ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 | corpus_name) + (1 | target_child_id) + (1 | transcript_id),
+  data = crqa_asym_mo_long,
+  REML = FALSE
+)
+summary(m_rq3b_mo)
+
+# LRT: three-way vs. two-way
+m_rq3b_mo_twoway <- lmer(
+  asym_value ~
+    (partner_type + condition + ns(target_child_age_yrs, df = 3))^2 +
+    target_child_sex +
+    (1 | corpus_name) + (1 | target_child_id) + (1 | transcript_id),
+  data = crqa_asym_mo_long,
+  REML = FALSE
+)
+anova(m_rq3b_mo_twoway, m_rq3b_mo)
+
+# Refit with REML for estimates
+m_rq3b_mo_reml <- update(m_rq3b_mo, REML = TRUE)
+confint(m_rq3b_mo_reml, method = "Wald")
+```
+
+```{r rq3b-emmeans}
+emmeans_rq3b <- emmeans(m_rq3b_mo_reml,
+                        ~ condition | partner_type + target_child_age_yrs,
+                        at = list(target_child_age_yrs = c(2, 4, 6, 8, 10)))
+print(emmeans_rq3b)
+pairs(emmeans_rq3b)
+```
+
+```{r fig-rq3b-trajectories}
+# Figure RQ3b-1. Partner-specific AI developmental trajectories
+ggpredict(m_rq3b_mo_reml,
+          terms = c("target_child_age_yrs [all]", "condition", "partner_type")) %>%
+  as.data.frame() %>%
+  ggplot(aes(x = x, y = predicted, colour = group, fill = group, linetype = group)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.15, colour = NA) +
+  geom_line(linewidth = 0.9) +
+  facet_wrap(~ facet, ncol = 2) +
+  scale_linetype_manual(values = c("Observed" = "solid", "Shuffled" = "dotted")) +
+  scale_colour_manual(values = c("Observed" = "#2980b9", "Shuffled" = "grey60")) +
+  scale_fill_manual(  values = c("Observed" = "#2980b9", "Shuffled" = "grey60")) +
+  labs(
+    title    = "Figure RQ3b-1. Asymmetry Index by age and partner type",
+    subtitle = "Positive = child leads  |  Model-estimated (Mother vs. Other Adult)  |  shading = 95% CI",
+    x = "Child age (years)", y = "Asymmetry Index",
+    colour = NULL, fill = NULL, linetype = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top", strip.text = element_text(face = "bold"))
+```
+
+*Reporting note:* Describe (1) whether AI differs in direction or magnitude between Mother and Other Adult dyads; (2) whether the developmental trajectory of directional bias changes at different rates for different partner types; (3) whether the shuffled curve stays near zero for all partner types (manipulation check).
+
+------------------------------------------------------------------------
+
+### C. Supplementary — Observed-Only Partner × Age AI Models
+
+> **SUPPLEMENTARY INFERENTIAL.** These models use observed AI only (no shuffled condition). They are supplementary to the condition × age interaction models in B.2 above, which are the primary inferential analyses for RQ3b.
+
+```{r partner-asym-model}
+# ── RQ3b Full interaction model (expect rank deficiency + convergence issues) ──
+m_partner_asym_full <- lmer(
+  asymmetry ~
+    partner_type * ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 | corpus_name) +
+    (1 | target_child_id),
+  data = crqa_data_dyadic,
+  REML = FALSE   # ML for LR tests
+)
+summary(m_partner_asym_full)   # note any rank deficiency / convergence warnings
+
+# LR test: do partner × age interactions improve fit over main effects only?
+m_partner_asym_main <- lmer(
+  asymmetry ~
     partner_type +
     ns(target_child_age_yrs, df = 3) +
     target_child_sex +
@@ -1161,42 +1690,53 @@ m_partner_wrr_noint <- lmer(
   data = crqa_data_dyadic,
   REML = FALSE
 )
-m_partner_wrr_int <- lmer(
-  wRR_excess ~
+anova(m_partner_asym_main, m_partner_asym_full)   # χ², df, p for interaction block
+
+# ── RQ3b Restricted: Mother vs Other Adult only ────────────────────────────────
+crqa_asym_mo <- crqa_data_dyadic %>%
+  filter(partner_type %in% c("Mother", "Other Adult")) %>%
+  mutate(partner_type = relevel(droplevels(partner_type), ref = "Mother"))
+
+m_asym_mo_int <- lmer(
+  asymmetry ~
     partner_type * ns(target_child_age_yrs, df = 3) +
     target_child_sex +
     (1 | corpus_name) +
     (1 | target_child_id),
-  data = crqa_data_dyadic,
+  data = crqa_asym_mo,
   REML = FALSE
 )
-anova(m_partner_wrr_noint, m_partner_wrr_int)
-```
 
-```{r partner-wrr-interaction-plot, message=FALSE}
-# Model-predicted wRR excess across age per partner type
-pred_wrr <- ggeffects::ggpredict(
-  m_partner_wrr,
-  terms = c("target_child_age_yrs [all]", "partner_type")
+m_asym_mo_main <- lmer(
+  asymmetry ~
+    partner_type +
+    ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 | corpus_name) +
+    (1 | target_child_id),
+  data = crqa_asym_mo,
+  REML = FALSE
 )
 
-plot(pred_wrr) +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
-  labs(
-    title    = "Predicted wRR excess by child age and partner type",
-    subtitle = "Model-estimated trajectories  |  partner_type × age interaction  |  shading = 95% CI",
-    x = "Child age (years)", y = "Predicted wRR excess",
-    colour = "Partner type", fill = "Partner type"
-  ) +
-  theme_minimal(base_size = 12) +
-  theme(legend.position = "top")
-```
+anova(m_asym_mo_main, m_asym_mo_int)   # LR test: trajectory difference?
 
-### 17d. Mixed model — does asymmetry differ by partner type?
+# Refit with REML for final estimates and CIs
+m_asym_mo_reml <- lmer(
+  asymmetry ~
+    partner_type * ns(target_child_age_yrs, df = 3) +
+    target_child_sex +
+    (1 | corpus_name) +
+    (1 | target_child_id),
+  data = crqa_asym_mo,
+  REML = TRUE
+)
+summary(m_asym_mo_reml)
+confint(m_asym_mo_reml, method = "Wald")
 
-```{r partner-asym-model}
-m_partner_asym <- lmer(
-  asymmetry_corrected ~
+# ── Main-effects summary for reporting partner-type contrasts ──────────────────
+# (used if interaction not significant — gives cleaner partner-type estimates)
+m_partner_asym_reml <- lmer(
+  asymmetry ~
     partner_type +
     ns(target_child_age_yrs, df = 3) +
     target_child_sex +
@@ -1205,39 +1745,8 @@ m_partner_asym <- lmer(
   data = crqa_data_dyadic,
   REML = TRUE
 )
-summary(m_partner_asym)
-```
-
-### 17f. Estimated marginal means per partner type
-
-`emmeans` averages predictions over child age and sex, so each point reflects the model-adjusted mean for that partner category on a common baseline. This is the most interpretable summary of the two models.
-
-```{r partner-emm-plot, message=FALSE}
-library(emmeans)
-
-emm_wrr  <- emmeans(m_partner_wrr,  ~ partner_type) %>%
-  as_tibble() %>% mutate(outcome = "wRR excess")
-
-emm_asym <- emmeans(m_partner_asym, ~ partner_type) %>%
-  as_tibble() %>% mutate(outcome = "Corrected asymmetry")
-
-emm_all <- bind_rows(emm_wrr, emm_asym) %>%
-  mutate(outcome = factor(outcome, levels = c("wRR excess", "Corrected asymmetry")))
-
-ggplot(emm_all,
-       aes(x = reorder(partner_type, emmean), y = emmean, colour = partner_type)) +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
-  geom_pointrange(aes(ymin = lower.CL, ymax = upper.CL),
-                  linewidth = 0.8, fatten = 3) +
-  facet_wrap(~ outcome, scales = "free_x") +
-  coord_flip() +
-  labs(
-    title    = "Model-estimated marginal means by social partner type",
-    subtitle = "Averaged over child age and sex  |  95% confidence intervals",
-    x = NULL, y = "Estimated marginal mean"
-  ) +
-  theme_minimal(base_size = 12) +
-  theme(legend.position = "none")
+summary(m_partner_asym_reml)
+confint(m_partner_asym_reml, method = "Wald")
 ```
 
 ------------------------------------------------------------------------
